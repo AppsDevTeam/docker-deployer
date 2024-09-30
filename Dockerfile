@@ -1,4 +1,4 @@
-FROM php:8.3-alpine
+FROM php:7.4
 
 LABEL maintainer="herloct <herloct@gmail.com>"
 
