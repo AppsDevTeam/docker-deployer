@@ -4,8 +4,8 @@ LABEL maintainer="herloct <herloct@gmail.com>"
 
 ENV DEPLOYER_VERSION=6.8.0
 
-RUN apk update --no-cache \
-    && apk add --no-cache \
+RUN apt-get update --no-cache \
+    && apt-get install --no-cache \
         openssh-client rsync
 
 RUN curl -L https://deployer.org/releases/v$DEPLOYER_VERSION/deployer.phar > /usr/local/bin/deployer \
