@@ -1,7 +1,31 @@
 [![license](https://img.shields.io/github/license/herloct/docker-deployer.svg)]()
 [![Build Status](https://travis-ci.org/herloct/docker-deployer.svg?branch=master)](https://travis-ci.org/herloct/docker-deployer)
 
-## Supported tags and respective `Dockerfile` links
+## AppsDevTeam images
+
+Published as `appsdevteam/deployer` for `linux/amd64` and `linux/arm64`:
+
+| Tag | Deployer | Base |
+|---|---|---|
+| `latest`, `6.9.0` | 6.9.0 (the last 6.x) | `php:8.2-cli` |
+| `7`, `7.5.12` | 7.5.12 | `php:8.2-cli` |
+
+The Deployer version is a build argument, so both images come from this one
+Dockerfile:
+
+```sh
+docker buildx build --platform linux/amd64,linux/arm64 \
+    -t appsdevteam/deployer:latest -t appsdevteam/deployer:6.9.0 --push .
+
+docker buildx build --platform linux/amd64,linux/arm64 \
+    --build-arg DEPLOYER_VERSION=7.5.12 \
+    -t appsdevteam/deployer:7 -t appsdevteam/deployer:7.5.12 --push .
+```
+
+Note that Deployer 7 is not backwards compatible with 6.x deploy scripts, so
+projects opt in by switching to the `7` tag.
+
+## Upstream: supported tags and respective `Dockerfile` links
 
 * [`6.3.0`, `latest`](https://github.com/herloct/docker-deployer/blob/6.3.0/Dockerfile)
 * [`5.0.3`](https://github.com/herloct/docker-deployer/blob/5.0.3/Dockerfile)
