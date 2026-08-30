@@ -1,6 +1,24 @@
 [![license](https://img.shields.io/github/license/herloct/docker-deployer.svg)]()
 [![Build Status](https://travis-ci.org/herloct/docker-deployer.svg?branch=master)](https://travis-ci.org/herloct/docker-deployer)
 
+## Usage in a project
+
+```sh
+composer require adt/docker-deployer
+```
+
+That provides `vendor/bin/dep`, a wrapper running Deployer from the image
+against the current directory (it mounts the project, `~/.ssh`, `~/.vault` and
+the ssh agent socket).
+
+Deployer 6 is used by default. To deploy with Deployer 7, set the image tag in
+the project's `.env` - `deploy.php` has to be rewritten for 7.x first, its API
+is not backwards compatible with 6.x:
+
+```
+DEPLOYER_VERSION=7
+```
+
 ## AppsDevTeam images
 
 Published as `appsdevteam/deployer` for `linux/amd64` and `linux/arm64`:

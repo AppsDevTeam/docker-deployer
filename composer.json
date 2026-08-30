@@ -1,0 +1,16 @@
+{
+	"name": "adt/docker-deployer",
+	"type": "library",
+	"description": "Deployer running in a docker container",
+	"keywords": ["docker", "deployer", "deployment"],
+	"license": "MIT",
+	"homepage": "https://www.appsdevteam.com",
+	"authors": [
+		{
+			"name": "Apps Dev Team",
+			"homepage": "https://www.appsdevteam.com",
+			"email": "hello@appsdevteam.com"
+		}
+	],
+	"bin": ["bin/dep"]
+}

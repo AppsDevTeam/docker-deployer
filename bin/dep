@@ -1,0 +1,25 @@
+#!/bin/bash
+
+# Runs Deployer from the appsdevteam/deployer image against the current project.
+#
+# The image tag comes from DEPLOYER_VERSION - set it in the project's .env to
+# pick a different Deployer, e.g. DEPLOYER_VERSION=7 for Deployer 7 (its deploy
+# scripts are not backwards compatible with 6.x). Defaults to the 6.x image.
+
+if [ -z "$DEPLOYER_VERSION" ] && [ -f "$PWD/.env" ]; then
+	DEPLOYER_VERSION=$(grep -E '^\s*DEPLOYER_VERSION\s*=' "$PWD/.env" | tail -n 1 | cut -d '=' -f 2- | tr -d '"'"'"' \r')
+fi
+
+IMAGE="appsdevteam/deployer:${DEPLOYER_VERSION:-latest}"
+
+VOLUME_SSH_AUTH_SOCK=$([ -z "$SSH_AUTH_SOCK" ] && echo "" || echo "-v $(dirname $SSH_AUTH_SOCK):$(dirname $SSH_AUTH_SOCK) -e SSH_AUTH_SOCK=$SSH_AUTH_SOCK")
+
+test -t 0 && USE_TTY="-t"
+
+docker run --rm -i ${USE_TTY} $VOLUME_SSH_AUTH_SOCK \
+    -v $(realpath $PWD):/project \
+    -v ~/.ssh:/root/.ssh \
+    -v ~/.vault:/project/.vault \
+    --pid host \
+    --network host \
+  $IMAGE "$@"
