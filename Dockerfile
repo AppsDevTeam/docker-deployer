@@ -2,7 +2,7 @@ FROM php:8.5-cli
 
 LABEL maintainer="herloct <herloct@gmail.com>"
 
-ENV DEPLOYER_VERSION=6.8.0
+ENV DEPLOYER_VERSION=6.9.0
 
 RUN apt-get update && apt-get install -y openssh-client rsync \
     && rm -rf /var/lib/apt/lists/*
