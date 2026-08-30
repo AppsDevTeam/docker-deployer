@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y openssh-client rsync \
 RUN curl -L https://deployer.org/releases/v$DEPLOYER_VERSION/deployer.phar > /usr/local/bin/deployer \
     && chmod +x /usr/local/bin/deployer
 
-VOLUME ["/project", "$HOME/.ssh"]
+VOLUME ["/project", "/root/.ssh"]
 WORKDIR /project
 
 COPY docker-entrypoint.sh /bin/docker-entrypoint.sh
