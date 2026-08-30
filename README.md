@@ -11,37 +11,46 @@ That provides `vendor/bin/dep`, a wrapper running Deployer from the image
 against the current directory (it mounts the project, `~/.ssh`, `~/.vault` and
 the ssh agent socket).
 
-Deployer 6 is used by default. To deploy with Deployer 7, set the image tag in
-the project's `.env` - `deploy.php` has to be rewritten for 7.x first, its API
-is not backwards compatible with 6.x:
+Deployer 6 is used by default. To deploy with a newer one, set the image tag in
+the project's `.env` - rewrite `deploy.php` for that generation first, neither
+7.x nor 8.x is backwards compatible with 6.x:
 
 ```
-DEPLOYER_VERSION=7
+DEPLOYER_VERSION=8
 ```
 
 ## AppsDevTeam images
 
-Published as `appsdevteam/deployer` for `linux/amd64` and `linux/arm64`:
+Published as `appsdevteam/deployer` for `linux/amd64` and `linux/arm64`. Each
+Deployer generation gets the PHP its own era shipped with - 8.x requires PHP
+>= 8.3, so one base does not fit all:
 
-| Tag | Deployer | Base |
+| Tag | Deployer | PHP |
 |---|---|---|
-| `latest`, `6.9.0` | 6.9.0 (the last 6.x) | `php:8.2-cli` |
-| `7`, `7.5.12` | 7.5.12 | `php:8.2-cli` |
+| `latest`, `6`, `6.9.0` | 6.9.0 (the last 6.x) | 8.2 |
+| `7`, `7.5.12` | 7.5.12 | 8.2 |
+| `8`, `8.0.5` | 8.0.5 | 8.4 |
 
-The Deployer version is a build argument, so both images come from this one
+Both versions are build arguments, so all the images come from this one
 Dockerfile:
 
 ```sh
 docker buildx build --platform linux/amd64,linux/arm64 \
-    -t appsdevteam/deployer:latest -t appsdevteam/deployer:6.9.0 --push .
+    --build-arg DEPLOYER_VERSION=6.9.0 --build-arg PHP_VERSION=8.2 \
+    -t appsdevteam/deployer:latest -t appsdevteam/deployer:6 \
+    -t appsdevteam/deployer:6.9.0 --push .
 
 docker buildx build --platform linux/amd64,linux/arm64 \
-    --build-arg DEPLOYER_VERSION=7.5.12 \
+    --build-arg DEPLOYER_VERSION=7.5.12 --build-arg PHP_VERSION=8.2 \
     -t appsdevteam/deployer:7 -t appsdevteam/deployer:7.5.12 --push .
+
+docker buildx build --platform linux/amd64,linux/arm64 \
+    --build-arg DEPLOYER_VERSION=8.0.5 --build-arg PHP_VERSION=8.4 \
+    -t appsdevteam/deployer:8 -t appsdevteam/deployer:8.0.5 --push .
 ```
 
-Note that Deployer 7 is not backwards compatible with 6.x deploy scripts, so
-projects opt in by switching to the `7` tag.
+`latest` stays on 6.x: neither 7.x nor 8.x is backwards compatible with a 6.x
+`deploy.php`, so projects opt in per project (see above).
 
 ## Upstream: supported tags and respective `Dockerfile` links
 

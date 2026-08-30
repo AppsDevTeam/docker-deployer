@@ -1,8 +1,10 @@
-FROM php:8.2-cli
+# Each Deployer generation needs a PHP of its own era - 8.x requires PHP >= 8.3,
+# while 6.x and 7.x are from the PHP 8.0-8.2 days. See README for the tag matrix.
+ARG PHP_VERSION=8.2
+FROM php:${PHP_VERSION}-cli
 
 LABEL maintainer="herloct <herloct@gmail.com>"
 
-# Build the Deployer 7 image with: --build-arg DEPLOYER_VERSION=7.5.12
 ARG DEPLOYER_VERSION=6.9.0
 ENV DEPLOYER_VERSION=$DEPLOYER_VERSION
 
