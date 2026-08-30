@@ -3,7 +3,7 @@
 ARG PHP_VERSION=8.2
 FROM php:${PHP_VERSION}-cli
 
-LABEL maintainer="herloct <herloct@gmail.com>"
+LABEL maintainer="Apps Dev Team <hello@appsdevteam.com>"
 
 ARG DEPLOYER_VERSION=6.9.0
 ENV DEPLOYER_VERSION=$DEPLOYER_VERSION
