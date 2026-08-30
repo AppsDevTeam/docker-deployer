@@ -1,4 +1,4 @@
-FROM php:8.5-cli
+FROM php:8.2-cli
 
 LABEL maintainer="herloct <herloct@gmail.com>"
 
