@@ -16,6 +16,75 @@ the project's `.env` - rewrite `deploy.php` for that generation first, neither
 DEPLOYER_VERSION=8
 ```
 
+## Shared recipe (Deployer 8)
+
+`recipe/default.php` is the deploy of AppsDevTeam projects created from the
+sandbox (Docker, read-only code on the server, two-step deploy with preprod).
+A project's `deploy.php` just requires it and adds its own settings and tasks
+after it:
+
+```php
+<?php
+namespace Deployer;
+
+require __DIR__ . '/project/vendor/adt/docker-deployer/recipe/default.php';
+
+set('shared_dirs', [...get('shared_dirs'), 'www/upload']);
+```
+
+Another company with a different server layout forks the recipe rather than
+configuring it.
+
+### Running
+
+Always through the project's makefile with `DEPLOYER_VERSION=8.0.5`:
+
+```sh
+dep deploy:build -o stage=main     # code, `make _prepare`, plan of migrations
+dep deploy:finish -o stage=main    # migrations once per stage, deploy:pause
+dep deploy:publish_check -o stage=main
+dep deploy:publish -o stage=main   # symlink, crontab, reload-consumers, cleanup
+```
+
+The stage is an option, not a host selector - Deployer 8 passes options to its
+worker processes, the selector it does not. Without `-o stage` (`dep list`,
+`dep tree deploy`, which reject `-o`) only the tasks are defined.
+`-o migrations_auto_confirm=true` runs migrations without asking (the makefile
+asks itself, using the `MIGRATIONS_PLAN>` lines of `deploy:build`).
+
+### What the project provides
+
+Env (`config/.env.common`, `config/.env.<stage>`, `config/docker/.env.<stage>`):
+
+| Variable | |
+|---|---|
+| `PROJECT_NAME` | remote user on the hosts |
+| `STAGE` | stage label |
+| `BRANCH` | deployed branch; its tracked remote in `.git/config` is the repository (fallback `origin`) |
+| `DEPLOY_HOSTS` | comma-separated hosts of the stage, migrations run on the first one |
+| `GLUSTERFS_APP_ROOT` | optional root of `data/` and `www/data/` shared by all hosts; empty = `shared/` on each host |
+
+Makefile targets:
+
+| Target | Where | |
+|---|---|---|
+| `secrets-decrypt SECRETS_STAGE=<stage>`, `_env STAGE=<stage>` | root | decrypt and assemble `.env` files in the temp clone |
+| `_prepare` | `project/` | `checkout` without migrations (clear, install, build) |
+| `migrations` | `project/` | `MIGRATIONS_DRY_RUN=1` prints the plan and a `MIGRATIONS_PENDING` line, `MIGRATIONS_AUTO_CONFIRM=1` runs them; empty target without a DB |
+| `reload-consumers` | `project/` | after publish; empty target without consumers |
+
+Files and servers:
+
+- `project/crontab.<stage>` - installed on **all** hosts after publish; cronie
+  cluster mode (`cron-cluster` in server-management-scripts) runs it only on
+  the leader, so it must be deployed on the hosts first.
+- `shared_dirs` = `log`, `data`, `www/data`; the compose override mounts
+  `${GLUSTERFS_APP_ROOT:-${PROJECT_ROOT}/project/shared}/{data,www/data}`.
+- `temp/` is per release under `shared/temp/releases/<N>`.
+- A deployment created by Deployer 6 is converted by `deploy:v6_compat`
+  automatically.
+- Long commands (`make _prepare`, migrations) have no timeout.
+
 ## AppsDevTeam images
 
 Published as `appsdevteam/deployer` for `linux/amd64` and `linux/arm64`. Each
