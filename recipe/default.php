@@ -392,13 +392,20 @@ function writeTracySystemInfo(): void
 // Pending migrations run in a maintenance window (see maintenanceOn()): DDL on a Galera cluster
 // conflicts with the metadata locks of the running application - an ALTER TABLE ... ADD FOREIGN
 // KEY on a table in use crashed a node (mysql-wsrep 8.0.43, wsrep_handle_mdl_conflict).
+//
+// No cd() in this task: on() in maintenanceOn()/maintenanceOff() reloads the host config from the
+// main process (Configuration::load()) and drops working_path set by cd() in the worker - the
+// migrations then ran in the home directory (`No rule to make target 'migrations'`). Every
+// command therefore changes the directory itself.
 desc('Run database migrations');
 task('app:migrations', function () {
-	cd('{{release_path}}');
-
 	// Nobody else deploys the stage (deploy:lock), so the file is a leftover of a killed deploy -
 	// the application would stay unavailable
-	if (test('[ -f {{maintenance_file}} ]')) {
+	$stale = false;
+	on(selectedHosts(), function () use (&$stale) {
+		$stale = $stale || test('[ -f {{maintenance_file}} ]');
+	});
+	if ($stale) {
 		warning('Stale maintenance file {{maintenance_file}} (killed deploy?) - removing it on all hosts');
 		maintenanceOff();
 	}
@@ -413,10 +420,10 @@ task('app:migrations', function () {
 		}
 		maintenanceOn();
 		try {
-			if (test('make -n migrations-kill-sessions >/dev/null 2>&1')) {
-				run('make migrations-kill-sessions MAINTENANCE_BYPASS=1', timeout: 0);
+			if (test('cd {{release_path}} && make -n migrations-kill-sessions >/dev/null 2>&1')) {
+				run('cd {{release_path}} && make migrations-kill-sessions MAINTENANCE_BYPASS=1 MIGRATIONS_KILL_WAIT={{migrations_kill_wait}}', timeout: 0);
 			}
-			run('make migrations MIGRATIONS_AUTO_CONFIRM=1 MAINTENANCE_BYPASS=1', timeout: 0);
+			run('cd {{release_path}} && make migrations MIGRATIONS_AUTO_CONFIRM=1 MAINTENANCE_BYPASS=1', timeout: 0);
 		} finally {
 			maintenanceOff();
 		}
@@ -428,8 +435,9 @@ task('app:migrations', function () {
 // containers it is /var/www/html/maintenance (the deploy root is mounted there).
 set('maintenance_file', '{{deploy_path}}/maintenance');
 
-// How long the consumers get to finish the job in progress before the remaining sessions are killed
-set('maintenance_grace', 10);
+// How long `make migrations-kill-sessions` waits for the sessions of the application to become
+// idle (a consumer finishing its job) before it kills them - passed as MIGRATIONS_KILL_WAIT
+set('migrations_kill_wait', 60);
 
 // The application has to check the file itself (README, Maintenance during migrations): the web
 // answers 503, console commands end right away and consumers wait until the file is gone.
@@ -442,11 +450,9 @@ function maintenanceOn(): void
 		run('date -Iseconds > {{maintenance_file}}');
 		info('maintenance ON on {{alias}}');
 	});
-	// Not cd(): it would change working_path of the first host for the rest of app:migrations
 	on(selectedHosts(), function () {
 		run('cd {{current_path}} && make reload-consumers MAINTENANCE_BYPASS=1');
 	});
-	run('sleep {{maintenance_grace}}');
 }
 
 function maintenanceOff(): void
@@ -457,11 +463,17 @@ function maintenanceOff(): void
 	});
 }
 
+// A deploy killed in the middle of the migrations (Ctrl+C, lost connection) leaves the file and
+// the application unavailable - `make deploy-unlock`, which is run after a killed deploy anyway,
+// removes it. On all hosts, not once.
+task('app:maintenance_off', function () {
+	run('rm -f {{maintenance_file}}');
+})->hidden();
+after('deploy:unlock', 'app:maintenance_off');
+
 // Plan of the migrations for `make deploy`: every line prefixed MIGRATIONS_PLAN>, the makefile
 // extracts them from the log and asks for the stages with a MIGRATIONS_PENDING line.
 task('app:migrations_plan', function () {
-	cd('{{release_path}}');
-
 	// output() instead of writeln(): writeln() passes the text through parse() and would take
 	// {{...}} in SQL for a variable
 	foreach (explode("\n", migrationsPlan()) as $line) {
@@ -474,9 +486,10 @@ task('app:migrations_plan', function () {
 // empty line - and Doctrine output starts with one. pipefail, so that a make error is not lost
 // in grep; `|| true` of grep, so that an empty plan is not an error. MAINTENANCE_BYPASS, so that
 // a maintenance file left by a killed deploy does not end the commands and hide the migrations.
+// Changes the directory itself, see app:migrations.
 function migrationsPlan(): string
 {
-	return run('set -o pipefail; make --no-print-directory migrations MIGRATIONS_DRY_RUN=1 MAINTENANCE_BYPASS=1 | { grep -v "^[[:space:]]*$" || true; }', timeout: 0);
+	return run('set -o pipefail; cd {{release_path}} && make --no-print-directory migrations MIGRATIONS_DRY_RUN=1 MAINTENANCE_BYPASS=1 | { grep -v "^[[:space:]]*$" || true; }', timeout: 0);
 }
 
 // Marks that deploy:build finished. Without it deploy:finish does not run the migrations (the

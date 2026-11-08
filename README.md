@@ -96,17 +96,18 @@ migrations, `app:migrations`:
 
 1. creates `~/project/maintenance` on **all** hosts of the stage (inside the
    containers `/var/www/html/maintenance`),
-2. runs `make reload-consumers` on all hosts and waits `maintenance_grace`
-   seconds (default 10), so that the consumers finish their jobs and restart,
-3. runs `make migrations-kill-sessions` when the project has the target,
+2. runs `make reload-consumers` on all hosts, so that the consumers restart
+   and start waiting,
+3. runs `make migrations-kill-sessions MIGRATIONS_KILL_WAIT=<migrations_kill_wait>`
+   (default 60) when the project has the target,
 4. runs the migrations,
 5. removes the file on all hosts - also when the migrations fail.
 
 All deploy commands get `MAINTENANCE_BYPASS=1` as a make argument (a variable
 from the included `.env` would override the environment). A maintenance file
 found at the start of `app:migrations` is a leftover of a killed deploy and
-gets removed. When a deploy is killed in the middle, remove the file by hand
-on every host: `rm ~/project/maintenance`.
+gets removed. When a deploy is killed in the middle, `make deploy-unlock`
+removes it (`deploy:unlock` on all hosts).
 
 What the project does with it (nothing happens in a project that ignores the
 file) - implemented by `handleMaintenance()` of
@@ -120,15 +121,16 @@ file) - implemented by `handleMaintenance()` of
   a consumer that exits in a loop
 - `MAINTENANCE_BYPASS=1` skips the check; it has to be in the project's
   `.env` (empty), `de` passes only the variables listed there
-- `migrations-kill-sessions` kills the other sessions of the application's DB
-  user right before the migrations (consumers still in a long job, idle
-  connections of the ProxySQL pool). `KILL` sent through ProxySQL does not
+- `migrations-kill-sessions` first waits up to `MIGRATIONS_KILL_WAIT` seconds
+  until the sessions of the application's DB user are idle (a consumer
+  finishing its job), then kills them (idle connections of the ProxySQL pool,
+  a job that did not finish in time). `KILL` sent through ProxySQL does not
   reach the backend (ProxySQL takes it for its own session id), so the
   command must connect to the DB node directly - on Galera the writer is
-  `@@wsrep_node_address` + `@@port`, asked through the proxy. A killed open
-  transaction (what holds the metadata locks) ends with an error; a single
-  autocommit query outside a transaction may be retried by ProxySQL
-  (`mysql-query_retries_on_failure`).
+  `@@wsrep_node_address` + `@@port`, asked through the proxy - and kill in
+  rounds, ProxySQL retries a killed autocommit statement on a new connection
+  (`mysql-query_retries_on_failure`). All of it is `dbal:kill-sessions --wait`
+  of adt/doctrine-components.
 
 Sessions of other DB users (people with their own accounts, backups) are not
 covered.
