@@ -109,7 +109,10 @@ gets removed. When a deploy is killed in the middle, remove the file by hand
 on every host: `rm ~/project/maintenance`.
 
 What the project does with it (nothing happens in a project that ignores the
-file):
+file) - implemented by `handleMaintenance()` of
+[adt/configurator](https://github.com/AppsDevTeam/Configurator) and
+`dbal:kill-sessions` of
+[adt/doctrine-components](https://github.com/AppsDevTeam/doctrine-components):
 
 - web: `503` with `Retry-After`
 - console: ends right away with exit code 0 (cron jobs skip a run), except
