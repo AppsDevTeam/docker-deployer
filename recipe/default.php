@@ -388,9 +388,20 @@ function writeTracySystemInfo(): void
 //   there is anything to run
 // - `make migrations MIGRATIONS_AUTO_CONFIRM=1` runs them without asking
 // A project without a database has an empty `migrations` target.
+//
+// Pending migrations run in a maintenance window (see maintenanceOn()): DDL on a Galera cluster
+// conflicts with the metadata locks of the running application - an ALTER TABLE ... ADD FOREIGN
+// KEY on a table in use crashed a node (mysql-wsrep 8.0.43, wsrep_handle_mdl_conflict).
 desc('Run database migrations');
 task('app:migrations', function () {
 	cd('{{release_path}}');
+
+	// Nobody else deploys the stage (deploy:lock), so the file is a leftover of a killed deploy -
+	// the application would stay unavailable
+	if (test('[ -f {{maintenance_file}} ]')) {
+		warning('Stale maintenance file {{maintenance_file}} (killed deploy?) - removing it on all hosts');
+		maintenanceOff();
+	}
 
 	$plan = migrationsPlan();
 	if (!output()->isVerbose()) {
@@ -400,9 +411,51 @@ task('app:migrations', function () {
 		if (!get('migrations_auto_confirm') && !askConfirmation('Are the migrations ok?')) {
 			throw error('Migrations not confirmed. Without asking: make deploy -- <stage> DEP_ARGS="-o migrations_auto_confirm=true"');
 		}
-		run('make migrations MIGRATIONS_AUTO_CONFIRM=1', timeout: 0);
+		maintenanceOn();
+		try {
+			if (test('make -n migrations-kill-sessions >/dev/null 2>&1')) {
+				run('make migrations-kill-sessions MAINTENANCE_BYPASS=1', timeout: 0);
+			}
+			run('make migrations MIGRATIONS_AUTO_CONFIRM=1 MAINTENANCE_BYPASS=1', timeout: 0);
+		} finally {
+			maintenanceOff();
+		}
 	}
 })->once();
+
+// Maintenance flag of the stage, one per host. Outside the releases: the migrations run from the
+// new release, the web and consumers still from `current`, both must see the same file. Inside the
+// containers it is /var/www/html/maintenance (the deploy root is mounted there).
+set('maintenance_file', '{{deploy_path}}/maintenance');
+
+// How long the consumers get to finish the job in progress before the remaining sessions are killed
+set('maintenance_grace', 10);
+
+// The application has to check the file itself (README, Maintenance during migrations): the web
+// answers 503, console commands end right away and consumers wait until the file is gone.
+// Running consumers are restarted (reload-consumers), so that they start waiting. The commands of
+// the deploy pass MAINTENANCE_BYPASS=1 - as a make argument, a variable from the included .env
+// would override the environment.
+function maintenanceOn(): void
+{
+	on(selectedHosts(), function () {
+		run('date -Iseconds > {{maintenance_file}}');
+		info('maintenance ON on {{alias}}');
+	});
+	// Not cd(): it would change working_path of the first host for the rest of app:migrations
+	on(selectedHosts(), function () {
+		run('cd {{current_path}} && make reload-consumers MAINTENANCE_BYPASS=1');
+	});
+	run('sleep {{maintenance_grace}}');
+}
+
+function maintenanceOff(): void
+{
+	on(selectedHosts(), function () {
+		run('rm -f {{maintenance_file}}');
+		info('maintenance OFF on {{alias}}');
+	});
+}
 
 // Plan of the migrations for `make deploy`: every line prefixed MIGRATIONS_PLAN>, the makefile
 // extracts them from the log and asks for the stages with a MIGRATIONS_PENDING line.
@@ -419,10 +472,11 @@ task('app:migrations_plan', function () {
 // Output of run() is printed only with -v and more (make deploy uses -vvv). Empty lines are
 // dropped: Deployer 8 (Logger::print) discards the rest of a received output block at the first
 // empty line - and Doctrine output starts with one. pipefail, so that a make error is not lost
-// in grep; `|| true` of grep, so that an empty plan is not an error.
+// in grep; `|| true` of grep, so that an empty plan is not an error. MAINTENANCE_BYPASS, so that
+// a maintenance file left by a killed deploy does not end the commands and hide the migrations.
 function migrationsPlan(): string
 {
-	return run('set -o pipefail; make --no-print-directory migrations MIGRATIONS_DRY_RUN=1 | { grep -v "^[[:space:]]*$" || true; }', timeout: 0);
+	return run('set -o pipefail; make --no-print-directory migrations MIGRATIONS_DRY_RUN=1 MAINTENANCE_BYPASS=1 | { grep -v "^[[:space:]]*$" || true; }', timeout: 0);
 }
 
 // Marks that deploy:build finished. Without it deploy:finish does not run the migrations (the

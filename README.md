@@ -71,7 +71,8 @@ Makefile targets:
 | `secrets-decrypt SECRETS_STAGE=<stage>`, `_env STAGE=<stage>` | root | decrypt and assemble `.env` files in the temp clone |
 | `_prepare` | `project/` | `checkout` without migrations (clear, install, build) |
 | `migrations` | `project/` | `MIGRATIONS_DRY_RUN=1` prints the plan and a `MIGRATIONS_PENDING` line, `MIGRATIONS_AUTO_CONFIRM=1` runs them; empty target without a DB |
-| `reload-consumers` | `project/` | after publish; empty target without consumers |
+| `reload-consumers` | `project/` | after publish and when the maintenance starts; empty target without consumers |
+| `migrations-kill-sessions` | `project/` | optional, see below |
 
 Files and servers:
 
@@ -84,6 +85,50 @@ Files and servers:
 - A deployment created by Deployer 6 is converted by `deploy:v6_compat`
   automatically.
 - Long commands (`make _prepare`, migrations) have no timeout.
+
+### Maintenance during migrations
+
+DDL on a Galera cluster conflicts with the metadata locks of the running
+application - even a plain `SELECT` in an open transaction holds one. An
+`ALTER TABLE ... ADD FOREIGN KEY` on a table in use crashed a node
+(mysql-wsrep 8.0.43, `wsrep_handle_mdl_conflict`). So when there are pending
+migrations, `app:migrations`:
+
+1. creates `~/project/maintenance` on **all** hosts of the stage (inside the
+   containers `/var/www/html/maintenance`),
+2. runs `make reload-consumers` on all hosts and waits `maintenance_grace`
+   seconds (default 10), so that the consumers finish their jobs and restart,
+3. runs `make migrations-kill-sessions` when the project has the target,
+4. runs the migrations,
+5. removes the file on all hosts - also when the migrations fail.
+
+All deploy commands get `MAINTENANCE_BYPASS=1` as a make argument (a variable
+from the included `.env` would override the environment). A maintenance file
+found at the start of `app:migrations` is a leftover of a killed deploy and
+gets removed. When a deploy is killed in the middle, remove the file by hand
+on every host: `rm ~/project/maintenance`.
+
+What the project does with it (nothing happens in a project that ignores the
+file):
+
+- web: `503` with `Retry-After`
+- console: ends right away with exit code 0 (cron jobs skip a run), except
+  the consumers, which wait until the file is gone - supervisor would restart
+  a consumer that exits in a loop
+- `MAINTENANCE_BYPASS=1` skips the check; it has to be in the project's
+  `.env` (empty), `de` passes only the variables listed there
+- `migrations-kill-sessions` kills the other sessions of the application's DB
+  user right before the migrations (consumers still in a long job, idle
+  connections of the ProxySQL pool). `KILL` sent through ProxySQL does not
+  reach the backend (ProxySQL takes it for its own session id), so the
+  command must connect to the DB node directly - on Galera the writer is
+  `@@wsrep_node_address` + `@@port`, asked through the proxy. A killed open
+  transaction (what holds the metadata locks) ends with an error; a single
+  autocommit query outside a transaction may be retried by ProxySQL
+  (`mysql-query_retries_on_failure`).
+
+Sessions of other DB users (people with their own accounts, backups) are not
+covered.
 
 ## AppsDevTeam images
 
