@@ -91,8 +91,22 @@ Files and servers:
 DDL on a Galera cluster conflicts with the metadata locks of the running
 application - even a plain `SELECT` in an open transaction holds one. An
 `ALTER TABLE ... ADD FOREIGN KEY` on a table in use crashed a node
-(mysql-wsrep 8.0.43, `wsrep_handle_mdl_conflict`). So when there are pending
-migrations, `app:migrations`:
+(mysql-wsrep 8.0.43, `wsrep_handle_mdl_conflict`). Every DDL takes the lock,
+`ALGORITHM=INSTANT` included (it just holds it shortly), and the crash happened
+while acquiring it.
+
+The window is used only when the plan touches the structure of existing
+tables (`recipe/maintenance.php`, test `php tests/maintenance.php`): pending
+migrations made only of DML (`INSERT`, `UPDATE`, `DELETE`, `REPLACE`,
+`SELECT`, `SET`, `DO`) and `CREATE TABLE` without a foreign key run without
+it. Anything else needs it, and so does a migration with no SQL in the plan
+(logic in PHP calling the connection directly - the dry-run does not show
+it) or a plan without the migration blocks at all. `DO SLEEP(...)` is the
+test migration of the window and always needs it. The plan is the
+Doctrine Migrations dry-run with `-vv` (`++ migrating`, `[debug] <sql>`,
+`Migration ... migrated`).
+
+When the window is needed, `app:migrations`:
 
 1. creates `~/project/maintenance` on **all** hosts of the stage (inside the
    containers `/var/www/html/maintenance`),

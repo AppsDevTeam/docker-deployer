@@ -16,6 +16,7 @@ namespace Deployer;
 use Deployer\Host\Host;
 
 require 'recipe/common.php';
+require_once __DIR__ . '/maintenance.php';
 
 // Value of `-o <name>=<value>` from the command line. Read from argv directly, because it is
 // needed while this file is being loaded (stage, hosts), before Deployer parses the options.
@@ -418,6 +419,18 @@ task('app:migrations', function () {
 		if (!get('migrations_auto_confirm') && !askConfirmation('Are the migrations ok?')) {
 			throw error('Migrations not confirmed. Without asking: make deploy -- <stage> DEP_ARGS="-o migrations_auto_confirm=true"');
 		}
+		// Data migrations (DML, CREATE TABLE without a foreign key) do not touch the structure of
+		// existing tables - no metadata lock conflict, so no maintenance window (recipe/maintenance.php)
+		$reason = migrationsMaintenanceReason($plan);
+		if ($reason === null) {
+			info('migrations change data only - without the maintenance window');
+			run('cd {{release_path}} && make migrations MIGRATIONS_AUTO_CONFIRM=1 MAINTENANCE_BYPASS=1', timeout: 0);
+			return;
+		}
+
+		// output() + escape(): the reason contains SQL - writeln()/info() would take {{...}} for
+		// a variable, the formatter `<...>` for a style tag
+		output()->writeln('<info>maintenance window</info>: ' . \Symfony\Component\Console\Formatter\OutputFormatter::escape($reason));
 		maintenanceOn();
 		try {
 			if (test('cd {{release_path}} && make -n migrations-kill-sessions >/dev/null 2>&1')) {
