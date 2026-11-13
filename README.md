@@ -149,6 +149,19 @@ file) - implemented by `handleMaintenance()` of
 Sessions of other DB users (people with their own accounts, backups) are not
 covered.
 
+### Expand and contract migrations
+
+The maintenance window ends with the migrations; until `deploy:publish` (and
+after a rollback) the old code of `current` keeps running on the migrated
+schema. A migration that removes what the old code still uses (`DROP` of
+a column or table, a rename, `NOT NULL`) therefore belongs to a contract
+migration of adt/doctrine-components (`expandContract: true`, README
+*Expand and contract migrations*): `migrations:migrate` defers it until its
+code is the running release, i.e. to the next deploy. The plan is the
+dry-run of the same command - it fails when an expand migration contains
+such a change, so `deploy:build` stops with the reason before anything runs.
+The recipe needs nothing for it.
+
 ## AppsDevTeam images
 
 Published as `appsdevteam/deployer` for `linux/amd64` and `linux/arm64`. Each
