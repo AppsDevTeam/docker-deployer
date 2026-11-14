@@ -62,11 +62,23 @@ without asking.
 Under the hood (`DEPLOYER_VERSION=8.0.5`):
 
 ```sh
-dep deploy:build -o stage=main     # code, `make _prepare`, plan of migrations
+dep deploy:build -o stage=main     # code, `dupd build`, `make _prepare`, plan of migrations
 dep deploy:finish -o stage=main    # migrations once per stage, deploy:pause
 dep deploy:publish_check -o stage=main
-dep deploy:publish -o stage=main   # symlink, crontab, reload-consumers, cleanup
+dep deploy:publish -o stage=main   # `dupd up`, symlink, crontab, reload-consumers, cleanup
 ```
+
+Containers: with `dupd` of [adt/docker-binaries](https://git.appsdevteam.com/adt/docker-binaries)
+on the host (root-owned, in sudoers without a password), `deploy:build` builds
+the images of the services with `build:` (`sudo dupd build`) and
+`deploy:publish` applies the deployed `docker/` right before the symlink switch
+(`sudo dupd up` - `docker compose up` that recreates only the services whose
+image or configuration changed). The first deploy starts the containers in
+`app:prepare`. dupd validates the compose configuration first (no privileged,
+host namespaces, capabilities, foreign mounts, networks or image names; services
+with bind mounts run under the UID of the account with no-new-privileges), so
+nobody has to run `make docker-upd` as root anymore. A host without dupd keeps
+the old behaviour: the containers are started and recreated by root by hand.
 
 The stage is an option, not a host selector - Deployer 8 passes options to its
 worker processes, the selector it does not. Without `-o stage` (`dep list`,

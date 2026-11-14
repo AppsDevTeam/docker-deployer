@@ -193,6 +193,7 @@ task('deploy:finish', [
 // every release has its own opcache keys and nothing has to be restarted.
 desc('Publish deploy');
 task('deploy:publish', [
+	'app:containers_up',
 	'deploy:symlink',
 	'app:publish_done',
 	'deploy:unlock',
@@ -281,7 +282,23 @@ task('deploy:temp_release_clone', function () {
 	// release being deployed, not from `current` - the image can be built for an unpublished release.
 	run("cp $releasePathOriginal/composer.json $releasePathOriginal/composer.lock {{project_root}}/{{docker_folder}}/php/");
 
+	// Images of the services with `build:` - dupd (adt/docker-binaries, root-owned, allowed in
+	// sudoers without a password) validates the compose configuration and builds from a tar made
+	// under the application account. The running containers are not touched, they get the new
+	// image in deploy:publish (app:containers_up). A host without dupd keeps the manual
+	// `make docker-upd` by root.
+	run('if command -v dupd >/dev/null 2>&1; then sudo -n dupd build; fi', timeout: 0, forceOutput: true);
+
 	set('release_path', $releasePathOriginal);
+});
+
+// Applies the docker configuration deployed to {{project_root}}/docker: `docker compose up` through
+// dupd recreates only the services whose image or configuration changed, the others keep running.
+// In deploy:publish right before deploy:symlink, so that a changed compose (e.g. a new mount)
+// never runs over the old release. First deploy: app:prepare starts the containers.
+desc('Apply docker configuration');
+task('app:containers_up', function () {
+	run('if command -v dupd >/dev/null 2>&1; then sudo -n dupd up; fi', timeout: 0, forceOutput: true);
 });
 
 // The dirs of the shared storage must be created under the application account BEFORE the
@@ -336,8 +353,12 @@ desc('Get the application ready');
 task('app:prepare', function () {
 	cd('{{release_path}}');
 
-	// First deploy: waits until somebody starts the containers - without a time limit
-	run('[ "$(sudo container-running php)" = "true" ] || (echo "Run the containers to continue." && while [ "$(sudo container-running php)" != "true" ]; do sleep 1; done; sleep 10)', timeout: 0, forceOutput: true);
+	// First deploy: starts the containers through dupd; without dupd waits until somebody
+	// starts them - without a time limit
+	run('if [ "$(sudo container-running php)" != "true" ]; then'
+		. ' if command -v dupd >/dev/null 2>&1; then sudo -n dupd up; else echo "Run the containers to continue."; fi;'
+		. ' while [ "$(sudo container-running php)" != "true" ]; do sleep 1; done; sleep 10;'
+		. ' fi', timeout: 0, forceOutput: true);
 
 	// `make checkout` without migrations - app:migrations runs them once per stage. No time limit:
 	// composer install + yarn build of a bigger project take longer than the default 300 s, and
