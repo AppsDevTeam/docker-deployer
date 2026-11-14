@@ -19,7 +19,6 @@ test -t 0 && USE_TTY="-t"
 docker run --rm -i ${USE_TTY} $VOLUME_SSH_AUTH_SOCK \
     -v $(realpath $PWD):/project \
     -v ~/.ssh:/root/.ssh \
-    -v ~/.vault:/project/.vault \
     --pid host \
     --network host \
   $IMAGE "$@"

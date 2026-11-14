@@ -5,8 +5,8 @@ composer require adt/docker-deployer
 ```
 
 That provides `vendor/bin/dep`, a wrapper running Deployer from the image
-against the current directory (it mounts the project, `~/.ssh`, `~/.vault` and
-the ssh agent socket).
+against the current directory (it mounts the project, `~/.ssh` and the ssh
+agent socket).
 
 Deployer 6 is used by default. To deploy with a newer one, set the image tag in
 the project's `.env` - rewrite `deploy.php` for that generation first, neither
