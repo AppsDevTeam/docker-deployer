@@ -37,7 +37,29 @@ configuring it.
 
 ### Running
 
-Always through the project's makefile with `DEPLOYER_VERSION=8.0.5`:
+Always through the make targets of `make/deploy.mk`, which the project's root
+makefile includes (`-include`, before `composer install` there is no vendor):
+
+```make
+-include project/vendor/adt/docker-deployer/make/deploy.mk
+```
+
+| Target | |
+|---|---|
+| `make deploy -- <stage> [<stage> ...]` | `deploy:build` of all stages in parallel (logs in `log/deploy/`), the pending migrations of all stages, one `[y/N]` (`DEP_YES=1` skips it), `deploy:finish` |
+| `make deploy-publish -- <stage> ...` | `deploy:publish_check` of all stages, then `deploy:publish` - nothing is published unless every stage is ready |
+| `make deploy-unlock -- <stage> ...` | unlock after a failed deploy |
+
+Options of `dep` go after the stages (`make deploy -- main --plan`), options
+with a value through `DEP_ARGS="-o release_name=15"`. The file expects
+`RUN_ARGS` (arguments after `--`) from [adt/make](https://github.com/AppsDevTeam/make)
+and sets `DEPLOYER_VERSION ?= 8.0.5`. The plan of migrations is read from the
+log with `LC_ALL=C`: Deployer splits the remote output in chunks, a multibyte
+character can end up split between two lines and macOS sed in a UTF-8 locale
+fails on it - before 1.5 the plan then looked empty and the migrations ran
+without asking.
+
+Under the hood (`DEPLOYER_VERSION=8.0.5`):
 
 ```sh
 dep deploy:build -o stage=main     # code, `make _prepare`, plan of migrations
