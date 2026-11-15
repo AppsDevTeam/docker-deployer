@@ -289,7 +289,7 @@ task('deploy:temp_release_clone', function () {
 	// under the application account. The running containers are not touched, they get the new
 	// image in deploy:publish (app:containers_up). A host without dupd keeps the manual
 	// `make docker-upd` by root.
-	run('if command -v dupd >/dev/null 2>&1; then sudo -n dupd build; fi', timeout: 0, forceOutput: true);
+	runVisible('if command -v dupd >/dev/null 2>&1; then sudo -n dupd build; fi');
 
 	set('release_path', $releasePathOriginal);
 });
@@ -300,7 +300,7 @@ task('deploy:temp_release_clone', function () {
 // never runs over the old release. First deploy: app:prepare starts the containers.
 desc('Apply docker configuration');
 task('app:containers_up', function () {
-	run('if command -v dupd >/dev/null 2>&1; then sudo -n dupd up; fi', timeout: 0, forceOutput: true);
+	runVisible('if command -v dupd >/dev/null 2>&1; then sudo -n dupd up; fi');
 });
 
 // The dirs of the shared storage must be created under the application account BEFORE the
@@ -366,12 +366,22 @@ task('app:prepare', function () {
 	// composer install + yarn build of a bigger project take longer than the default 300 s, and
 	// the deploy is always watched by somebody who can interrupt it. `timeout: 0`, not null - run()
 	// replaces null with default_timeout (despite its docblock), Symfony Process takes 0 as no limit.
-	run('make _prepare', timeout: 0, forceOutput: true);
+	runVisible('make _prepare');
 
 	writeTracySystemInfo();
 
 	run('rm -rf {{deploy_path_temp}}');
 });
+
+// Output of a long command printed as it runs, without a time limit. Blank lines are dropped:
+// Deployer 8 Logger::print() stops at the first empty line of a chunk (`return` instead of
+// `continue`), so everything after it was lost - a failed Vite build printed only „Build failed
+// with 1 error:“ and not the error itself, not even into the log. A line "0" is empty() in PHP
+// too, hence the space. pipefail keeps the exit code of the command.
+function runVisible(string $command): string
+{
+	return run("set -o pipefail; { $command; } 2>&1 | sed -e '/^[[:space:]]*$/d' -e 's/^0$/ 0/'", timeout: 0, forceOutput: true);
+}
 
 // System info for the Tracy panel (adt/tracy-system-info), written by the deploy on the host -
 // the console command tracy-system-info:add runs in the PHP container, where the code is
