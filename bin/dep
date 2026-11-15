@@ -12,13 +12,34 @@ fi
 
 IMAGE="appsdevteam/deployer:${DEPLOYER_VERSION:-latest}"
 
-VOLUME_SSH_AUTH_SOCK=$([ -z "$SSH_AUTH_SOCK" ] && echo "" || echo "-v $(dirname $SSH_AUTH_SOCK):$(dirname $SSH_AUTH_SOCK) -e SSH_AUTH_SOCK=$SSH_AUTH_SOCK")
+# SSH: privátní klíče do kontejneru nejdou, když je umí podepsat ssh-agent. Deployer běží pod
+# rootem a spouští deploy.php projektu i recept z jeho vendor/ - kód závislostí by jinak klíče
+# přečetl. Kontejner dostane socket agenta (klíč jde použít jen po dobu běhu, ne zkopírovat)
+# a z ~/.ssh jen config a known_hosts, pro čtení. Na macOS je agent hostu v kontejneru na
+# /run/host-services/ssh-auth.sock (Docker Desktop), na Linuxu se montuje socket z SSH_AUTH_SOCK.
+# Bez klíče v agentovi (typicky CI s klíčem v souboru) se namontují i soubory klíčů, jen pro čtení.
+# Jednotlivé soubory, ne adresář: /root/.ssh je v image VOLUME a ssh tam zakládá jen svoje věci.
+SSH_OPTS=()
+if [ "$(uname)" = "Darwin" ]; then
+    SSH_OPTS+=(-v /run/host-services/ssh-auth.sock:/ssh-agent -e SSH_AUTH_SOCK=/ssh-agent)
+elif [ -n "$SSH_AUTH_SOCK" ] && [ -S "$SSH_AUTH_SOCK" ]; then
+    SSH_OPTS+=(-v "$SSH_AUTH_SOCK:/ssh-agent" -e SSH_AUTH_SOCK=/ssh-agent)
+fi
+for f in config known_hosts; do
+    [ -f "$HOME/.ssh/$f" ] && SSH_OPTS+=(-v "$HOME/.ssh/$f:/root/.ssh/$f:ro")
+done
+if ! ssh-add -l >/dev/null 2>&1; then
+    echo "dep: ssh-agent nemá žádný klíč - montuji soubory klíčů z ~/.ssh (jen pro čtení). Bezpečnější je klíč přidat do agenta: ssh-add ~/.ssh/id_ed25519 (macOS: ssh-add --apple-use-keychain ...)" >&2
+    for key in "$HOME"/.ssh/id_*; do
+        case "$key" in *.pub) continue ;; esac
+        [ -f "$key" ] && SSH_OPTS+=(-v "$key:/root/.ssh/$(basename "$key"):ro")
+    done
+fi
 
 test -t 0 && USE_TTY="-t"
 
-docker run --rm -i ${USE_TTY} $VOLUME_SSH_AUTH_SOCK \
+docker run --rm -i ${USE_TTY} "${SSH_OPTS[@]}" \
     -v $(realpath $PWD):/project \
-    -v ~/.ssh:/root/.ssh \
     --pid host \
     --network host \
   $IMAGE "$@"

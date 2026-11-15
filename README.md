@@ -5,8 +5,18 @@ composer require adt/docker-deployer
 ```
 
 That provides `vendor/bin/dep`, a wrapper running Deployer from the image
-against the current directory (it mounts the project, `~/.ssh` and the ssh
-agent socket).
+against the current directory. It mounts the project, the ssh agent socket
+(on macOS `/run/host-services/ssh-auth.sock` of Docker Desktop) and only
+`~/.ssh/config` and `~/.ssh/known_hosts`, read-only. Private keys stay out of
+the container (it runs `deploy.php` and code from the project's `vendor/` as
+root) as long as the agent holds a key - add it once:
+
+```sh
+ssh-add --apple-use-keychain ~/.ssh/id_ed25519   # macOS, survives restarts with UseKeychain yes
+```
+
+Without a key in the agent (e.g. CI with the key in a file) the wrapper prints a
+warning and mounts the `~/.ssh/id_*` files, read-only.
 
 Deployer 6 is used by default. To deploy with a newer one, set the image tag in
 the project's `.env` - rewrite `deploy.php` for that generation first, neither
