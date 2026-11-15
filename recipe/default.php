@@ -286,10 +286,11 @@ task('deploy:temp_release_clone', function () {
 
 	// Images of the services with `build:` - dupd (adt/docker-binaries, root-owned, allowed in
 	// sudoers without a password) validates the compose configuration and builds from a tar made
-	// under the application account. The running containers are not touched, they get the new
+	// under the application account. Detected through sudo (`sudo -l <cmd>` = the account may
+	// run it): /usr/local/bin/dupd is a symlink into /root, so `command -v` fails for the account. The running containers are not touched, they get the new
 	// image in deploy:publish (app:containers_up). A host without dupd keeps the manual
 	// `make docker-upd` by root.
-	runVisible('if command -v dupd >/dev/null 2>&1; then sudo -n dupd build; fi');
+	runVisible('if sudo -n -l /usr/local/bin/dupd >/dev/null 2>&1; then sudo -n dupd build; fi');
 
 	set('release_path', $releasePathOriginal);
 });
@@ -300,7 +301,7 @@ task('deploy:temp_release_clone', function () {
 // never runs over the old release. First deploy: app:prepare starts the containers.
 desc('Apply docker configuration');
 task('app:containers_up', function () {
-	runVisible('if command -v dupd >/dev/null 2>&1; then sudo -n dupd up; fi');
+	runVisible('if sudo -n -l /usr/local/bin/dupd >/dev/null 2>&1; then sudo -n dupd up; fi');
 });
 
 // The dirs of the shared storage must be created under the application account BEFORE the
@@ -358,7 +359,7 @@ task('app:prepare', function () {
 	// First deploy: starts the containers through dupd; without dupd waits until somebody
 	// starts them - without a time limit
 	run('if [ "$(sudo container-running php)" != "true" ]; then'
-		. ' if command -v dupd >/dev/null 2>&1; then sudo -n dupd up; else echo "Run the containers to continue."; fi;'
+		. ' if sudo -n -l /usr/local/bin/dupd >/dev/null 2>&1; then sudo -n dupd up; else echo "Run the containers to continue."; fi;'
 		. ' while [ "$(sudo container-running php)" != "true" ]; do sleep 1; done; sleep 10;'
 		. ' fi', timeout: 0, forceOutput: true);
 
