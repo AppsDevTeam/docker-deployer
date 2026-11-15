@@ -12,7 +12,17 @@ the container (it runs `deploy.php` and code from the project's `vendor/` as
 root) as long as the agent holds a key - add it once:
 
 ```sh
-ssh-add --apple-use-keychain ~/.ssh/id_ed25519   # macOS, survives restarts with UseKeychain yes
+ssh-add --apple-use-keychain ~/.ssh/id_ed25519   # macOS
+```
+
+To keep it in the agent after a restart, add to `~/.ssh/config` (`IgnoreUnknown` is needed:
+the config is mounted into the Linux container, whose OpenSSH rejects `UseKeychain`):
+
+```
+Host *
+    IgnoreUnknown UseKeychain
+    UseKeychain yes
+    AddKeysToAgent yes
 ```
 
 Without a key in the agent (e.g. CI with the key in a file) the wrapper prints a
