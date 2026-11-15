@@ -133,6 +133,10 @@ Files and servers:
 - `project/crontab.<stage>` - installed on **all** hosts after publish; cronie
   cluster mode (`cron-cluster` in server-management-scripts) runs it only on
   the leader, so it must be deployed on the hosts first.
+- `project/crontab-all.<stage>` (optional, same format) - jobs that must run on
+  **every** host (local logs, local data cleanup): installed through
+  `sudo crontab-all` of adt/docker-binaries into `/etc/cron.d`, which cronie
+  runs on all nodes. Removing the file from the project removes it from the hosts.
 - `shared_dirs` = `log`, `data`, `www/data`; the compose override mounts
   `${GLUSTERFS_APP_ROOT:-${PROJECT_ROOT}/project/shared}/{data,www/data}`.
 - `temp/` is per release under `shared/temp/releases/<N>`.

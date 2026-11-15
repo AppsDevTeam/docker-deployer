@@ -589,11 +589,20 @@ task('app:unlock_own', function () {
 // cron-cluster of server-management-scripts) runs user crontabs only on the leader, so a failover
 // takes the jobs over. After deploy:symlink the `release` symlink no longer exists and Deployer 8
 // throws on {{release_path}}, publish tasks therefore use {{current_path}}.
+// Jobs that must run on every node (local logs, local data cleanup...) go to crontab-all.<stage>
+// in the same format: `crontab-all` (adt/docker-binaries, sudoers without a password) writes it to
+// /etc/cron.d, which cronie runs on all nodes. The file removed from the project = removed from the
+// host. `sudo -n` not at the start of the command: Deployer 8 would ask for a password on failure.
 desc('Apply crontab');
 task('app:crontab', function () {
 	cd('{{current_path}}');
 
 	run('crontab crontab.{{stage}}');
+	if (test('[ -f crontab-all.{{stage}} ]')) {
+		run('command -v crontab-all >/dev/null 2>&1 || { echo "crontab-all missing on the host - update docker-binaries (server-management-scripts --docker-binaries)" >&2; exit 1; }; sudo -n crontab-all crontab-all.{{stage}}');
+	} elseif (test('[ -f /etc/cron.d/crontab-all-$(id -un) ]')) {
+		run('sudo -n crontab-all -r');
+	}
 });
 
 // Restarts the background-queue consumers so that they run the new code. A project without
