@@ -276,7 +276,9 @@ task('deploy:temp_release_clone', function () {
 	// The docker configuration lives outside the release and outside deploy_path, so that it
 	// survives the symlink switch and does not get into the containers. It is applied by hand:
 	// cd {{project_root}}/docker && make docker-upd (root)
-	run('rsync -a --delete {{docker_folder}} {{project_root}}/');
+	// docker/.make (adt/make downloaded by that root `make docker-upd`) is not in git and belongs
+	// to root - --delete could not remove it and the deploy failed with rsync exit code 23
+	run('rsync -a --delete --exclude=/{{docker_folder}}/.make {{docker_folder}} {{project_root}}/');
 
 	// composer.json and composer.lock for php/Dockerfile (install-composer-extensions). From the
 	// release being deployed, not from `current` - the image can be built for an unpublished release.
