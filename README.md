@@ -131,7 +131,8 @@ Makefile targets:
 | Target | Where | |
 |---|---|---|
 | `secrets-decrypt SECRETS_STAGE=<stage>`, `_env STAGE=<stage>` | root | decrypt and assemble `.env` files in the temp clone |
-| `_prepare` | `project/` | `checkout` without migrations (clear, install, build) |
+| `_prepare` | `project/` | `checkout` without migrations (clear, install, build); run with `CHECK_EXTENSIONS=0` |
+| `check-extensions` | `project/` | in `deploy:publish` after `dupd up`, before the symlink: the new runtime has every `ext-*` of the release |
 | `migrations` | `project/` | `MIGRATIONS_DRY_RUN=1` prints the plan and a `MIGRATIONS_PENDING` line, `MIGRATIONS_AUTO_CONFIRM=1` runs them; empty target without a DB |
 | `reload-consumers` | `project/` | after publish and when the maintenance starts; empty target without consumers |
 | `migrations-kill-sessions` | `project/` | optional, see below |

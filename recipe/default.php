@@ -198,6 +198,7 @@ task('deploy:finish', [
 desc('Publish deploy');
 task('deploy:publish', [
 	'app:containers_up',
+	'app:check_extensions',
 	'deploy:symlink',
 	'app:publish_done',
 	'deploy:unlock',
@@ -314,6 +315,14 @@ task('app:containers_up', function () {
 	runVisible('if sudo -n -l /usr/local/bin/dupd >/dev/null 2>&1; then sudo -n dupd up; fi');
 });
 
+// The runtime has every ext-* of composer.json and composer.lock (adt/make check-extensions,
+// `php` of the running container - after app:containers_up that is the image built for this
+// release). Before deploy:symlink: a release whose extension is missing never goes public.
+// Checked in the release being published (the `release` symlink), not in `current`.
+task('app:check_extensions', function () {
+	run('cd {{deploy_path}}/release && make check-extensions');
+});
+
 // The dirs of the shared storage must be created under the application account BEFORE the
 // containers mount them - docker would create a missing bind source as root:root.
 // The content of the dir in the release (from git, e.g. data/locks/.gitignore) is merged into the
@@ -377,7 +386,10 @@ task('app:prepare', function () {
 	// composer install + yarn build of a bigger project take longer than the default 300 s, and
 	// the deploy is always watched by somebody who can interrupt it. `timeout: 0`, not null - run()
 	// replaces null with default_timeout (despite its docblock), Symfony Process takes 0 as no limit.
-	runVisible('make _prepare');
+	// Without the extension check (adt/make CHECK_EXTENSIONS): it runs `php` in the running
+	// container, which is still the previous image - the one just built by dupd starts in
+	// deploy:publish (app:containers_up). app:check_extensions checks right after that.
+	runVisible('make _prepare CHECK_EXTENSIONS=0');
 
 	writeTracySystemInfo();
 
