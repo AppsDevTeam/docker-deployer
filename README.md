@@ -70,6 +70,13 @@ makefile includes (`-include`, before `composer install` there is no vendor):
 | `make deploy-publish -- <stage> ...` | `deploy:publish_check` of all stages, then `deploy:publish` - nothing is published unless every stage is ready |
 | `make deploy-unlock -- <stage> ...` | unlock after a failed deploy |
 
+`make deploy` keeps the lock until `make deploy-publish` (the release waits on
+port 4434). The next `make deploy` releases its own finished lock, and any lock
+older than `lock_stale_minutes` (default 60, `0` = never) - a deploy takes
+minutes, so such a lock is a leftover of a killed deploy or of a release nobody
+published, and the deploy from CI does not need a manual `deploy-unlock`.
+A younger lock of somebody else stops the deploy with their name.
+
 Options of `dep` go after the stages (`make deploy -- main --plan`), options
 with a value through `DEP_ARGS="-o release_name=15"`. The file expects
 `RUN_ARGS` (arguments after `--`) from [adt/make](https://github.com/AppsDevTeam/make)

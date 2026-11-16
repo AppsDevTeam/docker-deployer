@@ -149,6 +149,9 @@ set('shared_storage_dirs', ['data', 'www/data']);
 // deploy:finish - and passes `-o migrations_auto_confirm=true`. Only `dep deploy` run directly
 // from a terminal asks.
 set('migrations_auto_confirm', cliOption('migrations_auto_confirm') === 'true');
+// A lock older than this (minutes) is a leftover of a killed deploy or of a release nobody
+// published - app:unlock_own removes it. 0 = never (`make deploy-unlock` only).
+set('lock_stale_minutes', 60);
 
 // Tasks
 
@@ -584,6 +587,12 @@ task('app:publish_done', function () {
 // another terminal - and somebody else's lock stay. The marks are deleted so that the next
 // running deploy does not inherit them - but only when nobody holds the lock: a locked deploy
 // fails on deploy:lock anyway and the marks belong to the lock holder.
+//
+// A lock older than lock_stale_minutes is removed whoever holds it: a deploy takes minutes, so
+// such a lock is a leftover of a killed deploy or of a release that nobody published. The lock
+// file has no PID, this age is the only way to tell "running" from "forgotten". A CI deploy
+// (adt/ci) then does not need anyone to run `make deploy-unlock` by hand after a crashed job;
+// a younger lock of somebody else still stops the deploy with their name.
 task('app:unlock_own', function () {
 	$lockFile = '{{deploy_path}}/.dep/deploy.lock';
 	$builtFile = '{{deploy_path}}/.dep/deploy.built';
@@ -591,6 +600,13 @@ task('app:unlock_own', function () {
 	if (test("[ -f $lockFile ] && { [ -f $builtFile ] || [ -f $pausedFile ]; } && [ \"\$(cat $lockFile)\" = " . quote(get('user')) . " ]")) {
 		run("rm -f $lockFile");
 		info('removed own deploy lock');
+	}
+	$staleMinutes = (int) get('lock_stale_minutes');
+	if ($staleMinutes > 0 && test("[ -f $lockFile ] && [ -n \"\$(find $lockFile -mmin +$staleMinutes)\" ]")) {
+		$holder = run("cat $lockFile");
+		$age = run("echo \$(( (\$(date +%s) - \$(stat -c %Y $lockFile)) / 60 ))");
+		run("rm -f $lockFile");
+		warning("removed stale deploy lock of $holder ($age min old, lock_stale_minutes: $staleMinutes)");
 	}
 	if (test("[ -f $lockFile ]")) {
 		return;
