@@ -180,6 +180,7 @@ task('deploy:build', [
 	'deploy:writable',
 	'deploy:clear_paths',
 	'app:release_temp',
+	'app:build_images',
 	'app:prepare',
 	'app:migrations_plan',
 	'app:built',
@@ -287,15 +288,21 @@ task('deploy:temp_release_clone', function () {
 	// release being deployed, not from `current` - the image can be built for an unpublished release.
 	run("cp $releasePathOriginal/composer.json $releasePathOriginal/composer.lock {{project_root}}/{{docker_folder}}/php/");
 
-	// Images of the services with `build:` - dupd (adt/docker-binaries, root-owned, allowed in
-	// sudoers without a password) validates the compose configuration and builds from a tar made
-	// under the application account. Detected through sudo (`sudo -l <cmd>` = the account may
-	// run it): /usr/local/bin/dupd is a symlink into /root, so `command -v` fails for the account. The running containers are not touched, they get the new
-	// image in deploy:publish (app:containers_up). A host without dupd keeps the manual
-	// `make docker-upd` by root.
-	runVisible('if sudo -n -l /usr/local/bin/dupd >/dev/null 2>&1; then sudo -n dupd build; fi');
-
 	set('release_path', $releasePathOriginal);
+});
+
+// Images of the services with `build:` - dupd (adt/docker-binaries, root-owned, allowed in sudoers
+// without a password) validates the compose configuration and builds from a tar made under the
+// application account. Detected through sudo (`sudo -l <cmd>` = the account may run it):
+// /usr/local/bin/dupd is a symlink into /root, so `command -v` fails for the account. The running
+// containers are not touched, they get the new image in deploy:publish (app:containers_up). A host
+// without dupd keeps the manual `make docker-upd` by root.
+// After app:shared_storage, deploy:shared and app:release_temp: the validation refuses a bind
+// mount whose source does not exist (docker would create it as root), and on the first deploy of
+// a stage those tasks are what creates shared/{log,data,www/data,temp} and the storage dirs.
+desc('Build images');
+task('app:build_images', function () {
+	runVisible('if sudo -n -l /usr/local/bin/dupd >/dev/null 2>&1; then sudo -n dupd build; fi');
 });
 
 // Applies the docker configuration deployed to {{project_root}}/docker: `docker compose up` through

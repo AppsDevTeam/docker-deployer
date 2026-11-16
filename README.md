@@ -97,7 +97,8 @@ dep deploy:publish -o stage=main   # `dupd up`, symlink, crontab, reload-consume
 
 Containers: with `dupd` of [adt/docker-binaries](https://git.appsdevteam.com/adt/docker-binaries)
 on the host (root-owned, in sudoers without a password), `deploy:build` builds
-the images of the services with `build:` (`sudo dupd build`) and
+the images of the services with `build:` (`sudo dupd build` in `app:build_images`, after the
+shared dirs exist - the validation refuses a missing bind source) and
 `deploy:publish` applies the deployed `docker/` right before the symlink switch
 (`sudo dupd up` - `docker compose up` that recreates only the services whose
 image or configuration changed). The first deploy starts the containers in
