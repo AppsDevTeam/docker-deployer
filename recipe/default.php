@@ -77,6 +77,12 @@ function defineStage(string $stage): void
 				continue;
 			}
 			[$key, $value] = explode('=', $keyValue, 2);
+			$key = trim((string) preg_replace('~^export\s+~', '', $key));
+			$value = trim($value);
+			// the same as the .env parsers of the containers and make: DEPLOY_HOSTS="a,b" is a,b, not "a
+			if (strlen($value) >= 2 && ($value[0] === '"' || $value[0] === "'") && substr($value, -1) === $value[0]) {
+				$value = substr($value, 1, -1);
+			}
 			$_ENV[$key] = $value;
 			putenv("$key=$value");
 		}
