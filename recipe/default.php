@@ -193,6 +193,7 @@ desc('Run migrations and finish deploy');
 task('deploy:finish', [
 	'app:check_built',
 	'app:migrations',
+	'app:smoke_check',
 	'deploy:pause',
 ]);
 
@@ -574,6 +575,33 @@ task('app:check_built', function () {
 	if (!test('[ -f {{deploy_path}}/.dep/deploy.built ] && [ -L {{deploy_path}}/release ]')) {
 		throw error('deploy:build of stage {{stage}} on {{alias}} did not finish - run `make deploy` again.');
 	}
+})->hidden();
+
+// A release failing every request (missing vendor, broken .env, an error in Bootstrap) fails before
+// Tracy runs: nothing dedupes the error and it would show only after publish. One request to the
+// preprod of every host (the running nginx serves release/www for X-Forwarded-Port: 4434), after the
+// migrations the new code may need; a 5xx stops the deploy before deploy:pause, so make
+// deploy-publish refuses the release. false = off, otherwise the path requested.
+set('smoke_check_path', '/');
+task('app:smoke_check', function () {
+	$path = get('smoke_check_path');
+	if ($path === false || empty($_ENV['NGINX_PORT']) || empty($_ENV['PROJECT_URL'])) {
+		warning('Smoke check of preprod skipped (smoke_check_path false, or NGINX_PORT / PROJECT_URL not set)');
+		return;
+	}
+	$code = trim(run('curl -s -o /dev/null -w "%{http_code}" --max-time 60'
+		. ' -H ' . escapeshellarg('Host: ' . $_ENV['PROJECT_URL'])
+		. ' -H "X-Forwarded-Port: 4434" -H "X-Forwarded-Proto: https"'
+		. ' ' . escapeshellarg('http://127.0.0.1:' . $_ENV['NGINX_PORT'] . $path) . ' || true'));
+	if ($code === '000') {
+		// first deploy: the containers start only in deploy:publish
+		warning("Preprod on {{alias}} does not answer (containers not running yet?) - smoke check skipped");
+		return;
+	}
+	if ((int) $code >= 500) {
+		throw error("Preprod of {{alias}} answered $code on $path - the release is broken, see `docker logs {$_ENV['PROJECT_NAME']}_php` and ~/project/shared/log");
+	}
+	info("preprod $path: $code");
 })->hidden();
 
 task('deploy:pause', function () {

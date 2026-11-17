@@ -84,6 +84,13 @@ minutes, so such a lock is a leftover of a killed deploy or of a release nobody
 published, and the deploy from CI does not need a manual `deploy-unlock`.
 A younger lock of somebody else stops the deploy with their name.
 
+After the migrations `deploy:finish` requests the preprod of every host (`curl` on
+`127.0.0.1:$NGINX_PORT` with `Host: $PROJECT_URL` and `X-Forwarded-Port: 4434`, so the running
+nginx serves `release/www`). A 5xx fails the deploy before `deploy:pause`, so a release that
+fails every request (missing vendor, broken `.env`, an error in Bootstrap - before Tracy, nothing
+dedupes it) cannot be published. No answer (first deploy, containers start only in publish) only
+warns. `set('smoke_check_path', '/login');` in `deploy.php` changes the path, `false` turns it off.
+
 Options of `dep` go after the stages (`make deploy -- main --plan`), options
 with a value through `DEP_ARGS="-o release_name=15"`. The file expects
 `RUN_ARGS` (arguments after `--`) from [adt/make](https://github.com/AppsDevTeam/make)
@@ -97,7 +104,7 @@ Under the hood (`DEPLOYER_VERSION=8.0.5`):
 
 ```sh
 dep deploy:build -o stage=main     # code, `dupd build`, `make _prepare`, plan of migrations
-dep deploy:finish -o stage=main    # migrations once per stage, deploy:pause
+dep deploy:finish -o stage=main    # migrations once per stage, smoke check of preprod, deploy:pause
 dep deploy:publish_check -o stage=main
 dep deploy:publish -o stage=main   # `dupd up`, symlink, crontab, reload-consumers, cleanup
 ```
