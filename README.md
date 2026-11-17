@@ -131,6 +131,7 @@ Env (`config/.env.common`, `config/.env.<stage>`, `config/docker/.env.<stage>`):
 | `STAGE` | stage label |
 | `BRANCH` | deployed branch; its tracked remote in `.git/config` is the repository (fallback `origin`) |
 | `DEPLOY_HOSTS` | comma-separated hosts of the stage, migrations run on the first one |
+| `DEPLOY_JUMP` | optional `ci-<repo>@<host>` for a stage behind a jump host (VMs behind a host); read by the CI component adt/ci >= 2.7, which writes `ProxyJump` for every `DEPLOY_HOSTS` entry into `~/.ssh/config` (`bin/dep` mounts it). Not used by the recipe itself |
 | `GLUSTERFS_APP_ROOT` | optional root of `data/` and `www/data/` shared by all hosts; empty = `shared/` on each host |
 
 Makefile targets:
