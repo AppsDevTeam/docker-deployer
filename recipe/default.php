@@ -17,6 +17,7 @@ use Deployer\Host\Host;
 
 require 'recipe/common.php';
 require_once __DIR__ . '/maintenance.php';
+require_once __DIR__ . '/smoke_check.php';
 
 // Value of `-o <name>=<value>` from the command line. Read from argv directly, because it is
 // needed while this file is being loaded (stage, hosts), before Deployer parses the options.
@@ -108,15 +109,19 @@ function defineStage(string $stage): void
 	}
 	set('repository', trim($matches[1]));
 
+	// The server clones the repository with the key of its own account - a read-only deploy key of
+	// the repository (app-ci.sh of server-management-scripts). The agent of the developer is not
+	// forwarded: anyone with root or the account on the host could sign with it for the whole
+	// deploy, wherever the developer's key leads. DEPLOY_FORWARD_AGENT=1 (config/.env.<stage>)
+	// only for a stage whose account has no deploy key yet. Off = `-o ForwardAgent=no`, not just
+	// no `-A`: `ForwardAgent yes` in the developer's ~/.ssh/config (mounted by bin/dep) would
+	// forward it anyway, the command line wins over the config file.
+	$forwardAgent = flagEnabled($_ENV['DEPLOY_FORWARD_AGENT'] ?? null);
 	host(...explode(',', $_ENV['DEPLOY_HOSTS']))
 		->setRemoteUser($_ENV['PROJECT_NAME'])
 		->setLabels(['stage' => $_ENV['STAGE']])
-		// The server clones the repository with the key of its own account - a read-only deploy key of
-		// the repository (app-ci.sh of server-management-scripts). The agent of the developer is not
-		// forwarded: anyone with root or the account on the host could sign with it for the whole
-		// deploy, wherever the developer's key leads. DEPLOY_FORWARD_AGENT=1 (config/.env.<stage>)
-		// only for a stage whose account has no deploy key yet.
-		->setForwardAgent(flagEnabled($_ENV['DEPLOY_FORWARD_AGENT'] ?? null))
+		->setForwardAgent($forwardAgent)
+		->setSshArguments($forwardAgent ? [] : ['-o ForwardAgent=no'])
 		// The default ControlPath is in ~/.ssh, which is mounted from the host into the Deployer
 		// container - a unix socket cannot always be created there (Docker Desktop on macOS).
 		// %C is a hash of the connection (host, port, user).
@@ -603,13 +608,14 @@ task('app:check_built', function () {
 // A release failing every request (missing vendor, broken .env, an error in Bootstrap) fails before
 // Tracy runs: nothing dedupes the error and it would show only after publish. One request to the
 // preprod of every host (the running nginx serves release/www for X-Forwarded-Port: 4434), after the
-// migrations the new code may need; a 5xx stops the deploy before deploy:pause, so make
-// deploy-publish refuses the release. false = off, otherwise the path requested.
+// migrations the new code may need; a failure stops the deploy before deploy:pause, so make
+// deploy-publish refuses the release. Passes on 2xx, 3xx, 401 and 403 (smokeCheckFailure()).
+// false = off, otherwise the path requested - a project whose `/` is not public and answers
+// something else than 401/403 points it at a public page.
 //
-// Only "connection refused" (curl exit 7) before the first publish is skipped: the containers start
-// in deploy:publish, nothing listens yet. Refused once `current` exists (wrong NGINX_PORT, nginx
-// down) and any other curl error (timeout 28, empty reply 52, reset 56 ...) fail the deploy - before,
-// every one of them was http code 000 and only warned.
+// Every curl error fails, "connection refused" included: the containers run since app:prepare,
+// which starts them on the first deploy (dupd up) or waits until somebody does - so nothing
+// listening means a wrong NGINX_PORT or a dead nginx container, never "first deploy".
 set('smoke_check_path', '/');
 task('app:smoke_check', function () {
 	$path = get('smoke_check_path');
@@ -624,19 +630,19 @@ task('app:smoke_check', function () {
 		. ' -H "X-Forwarded-Port: 4434" -H "X-Forwarded-Proto: https"'
 		. ' ' . escapeshellarg($url) . '; echo " $?"'));
 	[$code, $exit] = array_pad(preg_split('/\s+/', $result), 2, '');
-	if ($exit === '7') {
-		if (!test('[ -e {{deploy_path}}/current ]')) {
-			warning("Nothing listens on $url of {{alias}} - first deploy, the containers start in deploy:publish; smoke check skipped");
-			return;
-		}
-		throw error("Nothing listens on $url of {{alias}} although a release is published - wrong NGINX_PORT, or the nginx container"
-			. " {$_ENV['PROJECT_NAME']}_nginx is not running (sudo dupd up). Skip the check: DEP_ARGS=\"-o smoke_check_path=false\"");
+	$skip = 'Skip the check: DEP_ARGS="-o smoke_check_path=false"';
+	$failure = smokeCheckFailure($code, $exit);
+	if ($failure === 'curl' && $exit === '7') {
+		throw error("Nothing listens on $url of {{alias}} - wrong NGINX_PORT, or the nginx container"
+			. " {$_ENV['PROJECT_NAME']}_nginx is not running (sudo dupd up). $skip");
 	}
-	if ($exit !== '0') {
+	if ($failure === 'curl') {
 		throw error("Smoke check of preprod on {{alias}} failed: curl exit $exit (28 = timeout) on $url - see `docker logs {$_ENV['PROJECT_NAME']}_nginx` / `{$_ENV['PROJECT_NAME']}_php`");
 	}
-	if ((int) $code >= 500) {
-		throw error("Preprod of {{alias}} answered $code on $path - the release is broken, see `docker logs {$_ENV['PROJECT_NAME']}_php` and ~/project/shared/log");
+	if ($failure === 'status') {
+		throw error("Preprod of {{alias}} answered $code on $path (expected 2xx, 3xx, 401 or 403) - the release is broken,"
+			. " see `docker logs {$_ENV['PROJECT_NAME']}_php` and ~/project/shared/log. A path that is not public:"
+			. " set('smoke_check_path', '/<public page>') in deploy.php. $skip");
 	}
 	info("preprod $path: $code");
 })->hidden();
