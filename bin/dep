@@ -40,6 +40,5 @@ test -t 0 && USE_TTY="-t"
 
 docker run --rm -i ${USE_TTY} "${SSH_OPTS[@]}" \
     -v $(realpath $PWD):/project \
-    --pid host \
     --network host \
   $IMAGE "$@"

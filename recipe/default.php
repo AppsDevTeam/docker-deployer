@@ -98,9 +98,12 @@ function defineStage(string $stage): void
 	host(...explode(',', $_ENV['DEPLOY_HOSTS']))
 		->setRemoteUser($_ENV['PROJECT_NAME'])
 		->setLabels(['stage' => $_ENV['STAGE']])
-		// The server clones the repository with the key from the ssh agent (the dep wrapper mounts
-		// SSH_AUTH_SOCK). Deployer 8 forwards the agent only with this setting.
-		->setForwardAgent(true)
+		// The server clones the repository with the key of its own account - a read-only deploy key of
+		// the repository (app-ci.sh of server-management-scripts). The agent of the developer is not
+		// forwarded: anyone with root or the account on the host could sign with it for the whole
+		// deploy, wherever the developer's key leads. DEPLOY_FORWARD_AGENT=1 (config/.env.<stage>)
+		// only for a stage whose account has no deploy key yet.
+		->setForwardAgent(!empty($_ENV['DEPLOY_FORWARD_AGENT']))
 		// The default ControlPath is in ~/.ssh, which is mounted from the host into the Deployer
 		// container - a unix socket cannot always be created there (Docker Desktop on macOS).
 		// %C is a hash of the connection (host, port, user).

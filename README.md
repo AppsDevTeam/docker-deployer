@@ -28,6 +28,13 @@ Host *
 Without a key in the agent (e.g. CI with the key in a file) the wrapper prints a
 warning and mounts the `~/.ssh/id_*` files, read-only.
 
+The agent is **not forwarded** to the servers: the server clones the repository with the key of
+its own account (`~/.ssh/id_ed25519` of the project user), which must be a read-only deploy key of
+the repository - `app-ci.sh` of server-management-scripts adds it. With a forwarded agent anyone
+with root or the project account on the host could sign with the developer's key for the whole
+deploy. A stage whose account has no deploy key yet sets `DEPLOY_FORWARD_AGENT=1` in
+`config/.env.<stage>` until it gets one.
+
 Deployer 6 is used by default. To deploy with a newer one, set the image tag in
 the project's `.env` - rewrite `deploy.php` for that generation first, neither
 7.x nor 8.x is backwards compatible with 6.x:
