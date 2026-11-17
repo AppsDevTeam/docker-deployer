@@ -17,7 +17,9 @@ IMAGE="appsdevteam/deployer:${DEPLOYER_VERSION:-latest}"
 # přečetl. Kontejner dostane socket agenta (klíč jde použít jen po dobu běhu, ne zkopírovat)
 # a z ~/.ssh jen config a known_hosts, pro čtení. Na macOS je agent hostu v kontejneru na
 # /run/host-services/ssh-auth.sock (Docker Desktop), na Linuxu se montuje socket z SSH_AUTH_SOCK.
-# Bez klíče v agentovi (typicky CI s klíčem v souboru) se namontují i soubory klíčů, jen pro čtení.
+# Bez klíče v agentovi se namontuje jen jeden soubor klíče (DEP_SSH_KEY, jinak ~/.ssh/id_ed25519 -
+# tam ho dává adt/ci), pro čtení: v CI (CI=true) vždy, mimo CI jen s výslovně nastaveným DEP_SSH_KEY,
+# jinak dep skončí chybou - dřív se montovaly všechny ~/.ssh/id_* a root v kontejneru je četl.
 # Jednotlivé soubory, ne adresář: /root/.ssh je v image VOLUME a ssh tam zakládá jen svoje věci.
 SSH_OPTS=()
 if [ "$(uname)" = "Darwin" ]; then
@@ -29,16 +31,23 @@ for f in config known_hosts; do
     [ -f "$HOME/.ssh/$f" ] && SSH_OPTS+=(-v "$HOME/.ssh/$f:/root/.ssh/$f:ro")
 done
 if ! ssh-add -l >/dev/null 2>&1; then
-    echo "dep: ssh-agent nemá žádný klíč - montuji soubory klíčů z ~/.ssh (jen pro čtení). Bezpečnější je klíč přidat do agenta: ssh-add ~/.ssh/id_ed25519 (macOS: ssh-add --apple-use-keychain ...)" >&2
-    for key in "$HOME"/.ssh/id_*; do
-        case "$key" in *.pub) continue ;; esac
-        [ -f "$key" ] && SSH_OPTS+=(-v "$key:/root/.ssh/$(basename "$key"):ro")
-    done
+    if [ -z "$DEP_SSH_KEY" ] && [ "$CI" != "true" ]; then
+        echo "dep: ssh-agent nemá žádný klíč. Přidej ho: ssh-add ~/.ssh/id_ed25519 (macOS: ssh-add --apple-use-keychain ~/.ssh/id_ed25519)." >&2
+        echo "     Bez agenta jen výslovně: DEP_SSH_KEY=~/.ssh/<klíč> (namontuje se jen ten, pro čtení, do kontejneru běžícího pod rootem)." >&2
+        exit 1
+    fi
+    key="${DEP_SSH_KEY:-$HOME/.ssh/id_ed25519}"
+    if [ ! -f "$key" ]; then
+        echo "dep: ssh-agent nemá žádný klíč a soubor klíče $key neexistuje (DEP_SSH_KEY)." >&2
+        exit 1
+    fi
+    echo "dep: ssh-agent nemá žádný klíč - montuji jen $key (pro čtení)." >&2
+    SSH_OPTS+=(-v "$key:/root/.ssh/$(basename "$key"):ro")
 fi
 
 test -t 0 && USE_TTY="-t"
 
-docker run --rm -i ${USE_TTY} "${SSH_OPTS[@]}" \
-    -v $(realpath $PWD):/project \
+docker run --rm -i ${USE_TTY:+"$USE_TTY"} "${SSH_OPTS[@]}" \
+    -v "$(realpath "$PWD")":/project \
     --network host \
-  $IMAGE "$@"
+  "$IMAGE" "$@"

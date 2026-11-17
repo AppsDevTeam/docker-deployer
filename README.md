@@ -25,15 +25,21 @@ Host *
     AddKeysToAgent yes
 ```
 
-Without a key in the agent (e.g. CI with the key in a file) the wrapper prints a
-warning and mounts the `~/.ssh/id_*` files, read-only.
+Without a key in the agent the wrapper mounts **one** key file, read-only, and warns:
+`DEP_SSH_KEY` if set, otherwise `~/.ssh/id_ed25519` (where adt/ci writes the deploy key). This
+happens in CI (`CI=true`) or when `DEP_SSH_KEY` is set explicitly; anywhere else `dep` fails and
+asks to add the key to the agent - before 1.19 it mounted every `~/.ssh/id_*` into the container
+running as root. A key with another name than the OpenSSH defaults (`id_ed25519`, `id_rsa`, ...)
+also needs `IdentityFile ~/.ssh/<name>` in `~/.ssh/config` (mounted, `~` = `/root` in the container).
 
 The agent is **not forwarded** to the servers: the server clones the repository with the key of
 its own account (`~/.ssh/id_ed25519` of the project user), which must be a read-only deploy key of
 the repository - `app-ci.sh` of server-management-scripts adds it. With a forwarded agent anyone
 with root or the project account on the host could sign with the developer's key for the whole
 deploy. A stage whose account has no deploy key yet sets `DEPLOY_FORWARD_AGENT=1` in
-`config/.env.<stage>` until it gets one.
+`config/.env.<stage>` until it gets one. Only `1`, `true`, `yes`, `on` (case-insensitive, quotes
+stripped) turn it on - before 1.19 any non-empty value did, `false` and `0` included. The same
+parsing applies to `-o migrations_auto_confirm=`.
 
 Deployer 6 is used by default. To deploy with a newer one, set the image tag in
 the project's `.env` - rewrite `deploy.php` for that generation first, neither
@@ -91,8 +97,12 @@ After the migrations `deploy:finish` requests the preprod of every host (`curl` 
 `127.0.0.1:$NGINX_PORT` with `Host: $PROJECT_URL` and `X-Forwarded-Port: 4434`, so the running
 nginx serves `release/www`). A 5xx fails the deploy before `deploy:pause`, so a release that
 fails every request (missing vendor, broken `.env`, an error in Bootstrap - before Tracy, nothing
-dedupes it) cannot be published. No answer (first deploy, containers start only in publish) only
-warns. `set('smoke_check_path', '/login');` in `deploy.php` changes the path, `false` turns it off.
+dedupes it) cannot be published. Only "connection refused" (curl exit 7) before the first publish
+(no `current` yet - the containers start only in publish) warns and skips the check. Connection
+refused once a release is published (wrong `NGINX_PORT`, nginx container down) and any other curl
+error (timeout = exit 28, empty reply, reset ...) fail the deploy - before 1.19 they all came out as
+code `000` and only warned. `set('smoke_check_path', '/login');` in `deploy.php` changes the path,
+`false` turns it off; for a single deploy `DEP_ARGS="-o smoke_check_path=false"`.
 
 Options of `dep` go after the stages (`make deploy -- main --plan`), options
 with a value through `DEP_ARGS="-o release_name=15"`. The file expects

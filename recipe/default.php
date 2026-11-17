@@ -42,6 +42,13 @@ function cliOption(string $name): ?string
 	return null;
 }
 
+// A flag from env/-o: only 1/true/yes/on (case-insensitive, quotes stripped) switch it on - with
+// !empty() also `false`, `no`, `off` and `"0"` (the env parser keeps quotes) would turn it on.
+function flagEnabled(?string $value): bool
+{
+	return in_array(strtolower(trim((string) $value, " \t\"'")), ['1', 'true', 'yes', 'on'], true);
+}
+
 // The stage is passed as `-o stage=<stage>`, not as a host selector: the selector is not passed
 // to the worker processes, options are. So every process knows the stage, loads its env and
 // defines the same hosts. One run always holds just the hosts of one stage, hence `all`.
@@ -103,7 +110,7 @@ function defineStage(string $stage): void
 		// forwarded: anyone with root or the account on the host could sign with it for the whole
 		// deploy, wherever the developer's key leads. DEPLOY_FORWARD_AGENT=1 (config/.env.<stage>)
 		// only for a stage whose account has no deploy key yet.
-		->setForwardAgent(!empty($_ENV['DEPLOY_FORWARD_AGENT']))
+		->setForwardAgent(flagEnabled($_ENV['DEPLOY_FORWARD_AGENT'] ?? null))
 		// The default ControlPath is in ~/.ssh, which is mounted from the host into the Deployer
 		// container - a unix socket cannot always be created there (Docker Desktop on macOS).
 		// %C is a hash of the connection (host, port, user).
@@ -151,7 +158,7 @@ set('shared_storage_dirs', ['data', 'www/data']);
 // migrations ok?". The makefile asks instead - once for all stages, between deploy:build and
 // deploy:finish - and passes `-o migrations_auto_confirm=true`. Only `dep deploy` run directly
 // from a terminal asks.
-set('migrations_auto_confirm', cliOption('migrations_auto_confirm') === 'true');
+set('migrations_auto_confirm', flagEnabled(cliOption('migrations_auto_confirm')));
 // A lock of a finished deploy (deploy.paused) without activity for this long (minutes) belongs to
 // a release nobody published - app:unlock_own removes it. 0 = never (`make deploy-unlock` only).
 set('lock_stale_minutes', 60);
@@ -592,21 +599,35 @@ task('app:check_built', function () {
 // preprod of every host (the running nginx serves release/www for X-Forwarded-Port: 4434), after the
 // migrations the new code may need; a 5xx stops the deploy before deploy:pause, so make
 // deploy-publish refuses the release. false = off, otherwise the path requested.
+//
+// Only "connection refused" (curl exit 7) before the first publish is skipped: the containers start
+// in deploy:publish, nothing listens yet. Refused once `current` exists (wrong NGINX_PORT, nginx
+// down) and any other curl error (timeout 28, empty reply 52, reset 56 ...) fail the deploy - before,
+// every one of them was http code 000 and only warned.
 set('smoke_check_path', '/');
 task('app:smoke_check', function () {
 	$path = get('smoke_check_path');
-	if ($path === false || empty($_ENV['NGINX_PORT']) || empty($_ENV['PROJECT_URL'])) {
+	if ($path === false || $path === 'false' || empty($_ENV['NGINX_PORT']) || empty($_ENV['PROJECT_URL'])) {
 		warning('Smoke check of preprod skipped (smoke_check_path false, or NGINX_PORT / PROJECT_URL not set)');
 		return;
 	}
-	$code = trim(run('curl -s -o /dev/null -w "%{http_code}" --max-time 60'
+	$url = 'http://127.0.0.1:' . $_ENV['NGINX_PORT'] . $path;
+	// `; echo` - run() throws on a non-zero exit and the exit code of curl is what tells the cases apart
+	$result = trim(run('curl -s -o /dev/null -w "%{http_code}" --connect-timeout 10 --max-time 60'
 		. ' -H ' . escapeshellarg('Host: ' . $_ENV['PROJECT_URL'])
 		. ' -H "X-Forwarded-Port: 4434" -H "X-Forwarded-Proto: https"'
-		. ' ' . escapeshellarg('http://127.0.0.1:' . $_ENV['NGINX_PORT'] . $path) . ' || true'));
-	if ($code === '000') {
-		// first deploy: the containers start only in deploy:publish
-		warning("Preprod on {{alias}} does not answer (containers not running yet?) - smoke check skipped");
-		return;
+		. ' ' . escapeshellarg($url) . '; echo " $?"'));
+	[$code, $exit] = array_pad(preg_split('/\s+/', $result), 2, '');
+	if ($exit === '7') {
+		if (!test('[ -e {{deploy_path}}/current ]')) {
+			warning("Nothing listens on $url of {{alias}} - first deploy, the containers start in deploy:publish; smoke check skipped");
+			return;
+		}
+		throw error("Nothing listens on $url of {{alias}} although a release is published - wrong NGINX_PORT, or the nginx container"
+			. " {$_ENV['PROJECT_NAME']}_nginx is not running (sudo dupd up). Skip the check: DEP_ARGS=\"-o smoke_check_path=false\"");
+	}
+	if ($exit !== '0') {
+		throw error("Smoke check of preprod on {{alias}} failed: curl exit $exit (28 = timeout) on $url - see `docker logs {$_ENV['PROJECT_NAME']}_nginx` / `{$_ENV['PROJECT_NAME']}_php`");
 	}
 	if ((int) $code >= 500) {
 		throw error("Preprod of {{alias}} answered $code on $path - the release is broken, see `docker logs {$_ENV['PROJECT_NAME']}_php` and ~/project/shared/log");
