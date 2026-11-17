@@ -78,11 +78,14 @@ makefile includes (`-include`, before `composer install` there is no vendor):
 | `make deploy-unlock -- <stage> ...` | unlock after a failed deploy |
 
 `make deploy` keeps the lock until `make deploy-publish` (the release waits on
-port 4434). The next `make deploy` releases its own finished lock, and any lock
-older than `lock_stale_minutes` (default 60, `0` = never) - a deploy takes
-minutes, so such a lock is a leftover of a killed deploy or of a release nobody
-published, and the deploy from CI does not need a manual `deploy-unlock`.
-A younger lock of somebody else stops the deploy with their name.
+port 4434). The next `make deploy` releases its own finished lock, and a lock of
+somebody else only when that deploy finished (`deploy.paused`) and has been idle
+for `lock_stale_minutes` (default 60, `0` = never) - a release nobody published.
+The idle time counts from the last activity: long commands (build, migrations)
+renew the lock every minute and `deploy:pause` once more, so migrations running
+for hours or a deploy waiting for `[y/N]` keep their lock (before 1.18 a second
+deploy removed it after an hour, then the maintenance file in the middle of the
+DDL). The lock of a running or killed deploy stays - `make deploy-unlock`.
 
 After the migrations `deploy:finish` requests the preprod of every host (`curl` on
 `127.0.0.1:$NGINX_PORT` with `Host: $PROJECT_URL` and `X-Forwarded-Port: 4434`, so the running

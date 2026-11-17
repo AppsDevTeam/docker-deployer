@@ -152,8 +152,8 @@ set('shared_storage_dirs', ['data', 'www/data']);
 // deploy:finish - and passes `-o migrations_auto_confirm=true`. Only `dep deploy` run directly
 // from a terminal asks.
 set('migrations_auto_confirm', cliOption('migrations_auto_confirm') === 'true');
-// A lock older than this (minutes) is a leftover of a killed deploy or of a release nobody
-// published - app:unlock_own removes it. 0 = never (`make deploy-unlock` only).
+// A lock of a finished deploy (deploy.paused) without activity for this long (minutes) belongs to
+// a release nobody published - app:unlock_own removes it. 0 = never (`make deploy-unlock` only).
 set('lock_stale_minutes', 60);
 
 // Tasks
@@ -407,7 +407,17 @@ task('app:prepare', function () {
 // too, hence the space. pipefail keeps the exit code of the command.
 function runVisible(string $command): string
 {
-	return run("set -o pipefail; { $command; } 2>&1 | sed -e '/^[[:space:]]*$/d' -e 's/^0$/ 0/'", timeout: 0, forceOutput: true);
+	return run(withLockHeartbeat("set -o pipefail; { $command; } 2>&1 | sed -e '/^[[:space:]]*$/d' -e 's/^0$/ 0/'"), timeout: 0, forceOutput: true);
+}
+
+// The age of the lock is the time since the last activity of the deploy, not since its start:
+// a long command (migrations with timeout 0, a build) renews it every minute. touch -c does not
+// recreate a lock somebody removed meanwhile. The loop ends with the shell that started it, so
+// a killed deploy does not keep its lock alive - an orphaned command still running does, rightly.
+function withLockHeartbeat(string $command): string
+{
+	return '( while kill -0 $$ 2>/dev/null; do touch -c {{deploy_path}}/.dep/deploy.lock; sleep 60; done ) </dev/null >/dev/null 2>&1 & '
+		. "$command";
 }
 
 // System info for the Tracy panel (adt/tracy-system-info), written by the deploy on the host -
@@ -484,7 +494,7 @@ task('app:migrations', function () {
 		$reason = migrationsMaintenanceReason($plan);
 		if ($reason === null) {
 			info('migrations change data only - without the maintenance window');
-			run('cd {{release_path}} && make migrations MIGRATIONS_AUTO_CONFIRM=1 MAINTENANCE_BYPASS=1', timeout: 0);
+			run(withLockHeartbeat('cd {{release_path}} && make migrations MIGRATIONS_AUTO_CONFIRM=1 MAINTENANCE_BYPASS=1'), timeout: 0);
 			return;
 		}
 
@@ -494,9 +504,9 @@ task('app:migrations', function () {
 		maintenanceOn();
 		try {
 			if (test('cd {{release_path}} && make -n migrations-kill-sessions >/dev/null 2>&1')) {
-				run('cd {{release_path}} && make migrations-kill-sessions MAINTENANCE_BYPASS=1 MIGRATIONS_KILL_WAIT={{migrations_kill_wait}}', timeout: 0);
+				run(withLockHeartbeat('cd {{release_path}} && make migrations-kill-sessions MAINTENANCE_BYPASS=1 MIGRATIONS_KILL_WAIT={{migrations_kill_wait}}'), timeout: 0);
 			}
-			run('cd {{release_path}} && make migrations MIGRATIONS_AUTO_CONFIRM=1 MAINTENANCE_BYPASS=1', timeout: 0);
+			run(withLockHeartbeat('cd {{release_path}} && make migrations MIGRATIONS_AUTO_CONFIRM=1 MAINTENANCE_BYPASS=1'), timeout: 0);
 		} finally {
 			maintenanceOff();
 		}
@@ -609,6 +619,8 @@ task('deploy:pause', function () {
 	// only until deploy:publish
 	run('rm -f {{deploy_path}}/.dep/deploy.built');
 	run('touch {{deploy_path}}/.dep/deploy.paused');
+	// the stale time of a paused deploy counts from here
+	run('touch -c {{deploy_path}}/.dep/deploy.lock');
 	writeln('After verifying on port 4434, continue with the task "deploy:publish".');
 })->hidden();
 
@@ -638,11 +650,12 @@ task('app:publish_done', function () {
 // running deploy does not inherit them - but only when nobody holds the lock: a locked deploy
 // fails on deploy:lock anyway and the marks belong to the lock holder.
 //
-// A lock older than lock_stale_minutes is removed whoever holds it: a deploy takes minutes, so
-// such a lock is a leftover of a killed deploy or of a release that nobody published. The lock
-// file has no PID, this age is the only way to tell "running" from "forgotten". A CI deploy
-// (adt/ci) then does not need anyone to run `make deploy-unlock` by hand after a crashed job;
-// a younger lock of somebody else still stops the deploy with their name.
+// A lock of somebody else is removed only when its deploy finished (deploy.paused) and has been
+// idle for lock_stale_minutes - a release nobody published. The age is the time since the last
+// activity (withLockHeartbeat, deploy:pause), not since the start: before 1.18 the lock of a
+// deploy running migrations or waiting for [y/N] longer than an hour was removed, and the second
+// deploy deleted the maintenance file in the middle of the DDL and replaced the `release` symlink.
+// The lock of a killed or running deploy stays, `make deploy-unlock` removes it.
 task('app:unlock_own', function () {
 	$lockFile = '{{deploy_path}}/.dep/deploy.lock';
 	$builtFile = '{{deploy_path}}/.dep/deploy.built';
@@ -652,11 +665,11 @@ task('app:unlock_own', function () {
 		info('removed own deploy lock');
 	}
 	$staleMinutes = (int) get('lock_stale_minutes');
-	if ($staleMinutes > 0 && test("[ -f $lockFile ] && [ -n \"\$(find $lockFile -mmin +$staleMinutes)\" ]")) {
+	if ($staleMinutes > 0 && test("[ -f $lockFile ] && [ -f $pausedFile ] && [ -n \"\$(find $lockFile -mmin +$staleMinutes)\" ]")) {
 		$holder = run("cat $lockFile");
 		$age = run("echo \$(( (\$(date +%s) - \$(stat -c %Y $lockFile)) / 60 ))");
 		run("rm -f $lockFile");
-		warning("removed stale deploy lock of $holder ($age min old, lock_stale_minutes: $staleMinutes)");
+		warning("removed deploy lock of $holder - deploy finished but not published, idle for $age min (lock_stale_minutes: $staleMinutes)");
 	}
 	if (test("[ -f $lockFile ]")) {
 		return;
