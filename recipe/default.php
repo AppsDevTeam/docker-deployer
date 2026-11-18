@@ -603,8 +603,10 @@ task('app:migrations', function () {
 		// output() + escape(): the reason contains SQL - writeln()/info() would take {{...}} for
 		// a variable, the formatter `<...>` for a style tag
 		output()->writeln('<info>maintenance window</info>: ' . \Symfony\Component\Console\Formatter\OutputFormatter::escape($reason));
-		maintenanceOn();
+		// maintenanceOn() inside: a failure while turning it on (reload-consumers) must not leave the
+		// maintenance file behind
 		try {
+			maintenanceOn();
 			if (test('cd {{release_path}} && make -n migrations-kill-sessions >/dev/null 2>&1')) {
 				run(withLockHeartbeat('cd {{release_path}} && make migrations-kill-sessions MAINTENANCE_BYPASS=1 MIGRATIONS_KILL_WAIT={{migrations_kill_wait}}' . $app), timeout: 0);
 			}
@@ -636,7 +638,11 @@ function maintenanceOn(): void
 		info('maintenance ON on {{alias}}');
 	});
 	on(selectedHosts(), function () {
-		run('cd {{current_path}} && make reload-consumers MAINTENANCE_BYPASS=1');
+		// `current` of the first deploy of a project moved to the recipe predates adt/make: no such
+		// target (and no consumers the target would know)
+		if (test('cd {{current_path}} && make -n reload-consumers >/dev/null 2>&1')) {
+			run('cd {{current_path}} && make reload-consumers MAINTENANCE_BYPASS=1');
+		}
 	});
 }
 
