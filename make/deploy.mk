@@ -28,9 +28,12 @@ DEP_USER ?= $(or $(shell git config user.name 2>/dev/null),$(shell whoami))
 DEP_STAGES = $(filter-out -%,$(RUN_ARGS))
 DEP_OPTIONS = $(filter -%,$(RUN_ARGS)) $(DEP_ARGS)
 DEP_LOG_DIR ?= log/deploy
+# dep běží na pozadí a neinteraktivní shell mu SIGINT ignoruje - Ctrl+C by ukončil jen make
+# a deploy jel dál (i se zámkem). Past pošle TERM celé skupině procesů (dep, docker run).
 define dep_each
 	@if [ -z "$(DEP_STAGES)" ]; then echo "Chybí stage: make $@ -- <stage> [<stage> ...]" >&2; exit 1; fi
 	@run() { $(DEP) $(1) -o stage=$$1 -o "user=$(DEP_USER)" $(DEP_OPTIONS) -o migrations_auto_confirm=true -vvv; }; \
+	trap 'trap - INT TERM HUP; echo "$(1) přerušen - zámek zůstal: make deploy-unlock -- $(DEP_STAGES)" >&2; kill -TERM 0' INT TERM HUP; \
 	failed=; mkdir -p $(DEP_LOG_DIR); \
 	for stage in $(DEP_STAGES); do \
 		log=$(DEP_LOG_DIR)/$$(echo $(1) | tr : -)-$$stage.log; \
