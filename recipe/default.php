@@ -204,6 +204,7 @@ task('deploy:build', [
 	'app:build_images',
 	'app:prepare',
 	'app:preprod_up',
+	'app:check_extensions_preprod',
 	'app:migrations_plan',
 	'app:built',
 ]);
@@ -353,30 +354,70 @@ task('app:preprod_up', function () {
 	if (!$service) {
 		return;
 	}
-	runVisible('if sudo -n -l /usr/local/bin/dupd >/dev/null 2>&1; then'
-		. ' if sudo -n dupd rules | grep -q "^PREPROD"; then sudo -n dupd preprod start ' . escapeshellarg($service) . ';'
-		. ' else echo "dupd without preprod (docker-binaries < 3.22): preprod and migrations on the live service"; fi;'
-		. ' fi');
+	if (!preprodSupported()) {
+		if (test('sudo -n -l /usr/local/bin/dupd >/dev/null 2>&1')) {
+			warning('dupd on {{alias}} without preprod (docker-binaries < 3.22): preprod and migrations on the live service');
+		}
+		return;
+	}
+	runVisible('sudo -n dupd preprod start ' . escapeshellarg($service));
+})->hidden();
+
+// The extensions of the release in its runtime already in deploy:build: a missing ext-* fails here
+// with a clear message instead of "could not find driver" in the dry run of the migrations or a 500
+// of the smoke check. adt/make < 1.9.5 has no CHECK_EXTENSIONS_PHP, its check would run in the live
+// container with the previous image - only app:check_extensions in the publish then.
+task('app:check_extensions_preprod', function () {
+	$php = preprodPhp();
+	if ($php === null) {
+		return;
+	}
+	cd('{{release_path}}');
+	if (!test('make -n check-extensions CHECK_EXTENSIONS_PHP=__probe__ 2>/dev/null | grep -q __probe__')) {
+		return;
+	}
+	run('make check-extensions CHECK_EXTENSIONS_PHP=' . escapeshellarg($php));
 })->hidden();
 
 // A failure must not stop the other deploy:failed tasks (unlock)
 task('app:preprod_down', function () {
 	try {
-		run('if sudo -n -l /usr/local/bin/dupd >/dev/null 2>&1 && sudo -n dupd rules | grep -q "^PREPROD"; then sudo -n dupd preprod stop; fi');
+		if (preprodSupported()) {
+			run('cd ~ && sudo -n dupd preprod stop');
+		}
 	} catch (\Throwable $e) {
 		warning('dupd preprod stop failed on {{alias}}: ' . $e->getMessage());
 	}
 })->hidden();
 
-// APP of adt/make for the console commands of the release being deployed: in the preprod copy when
-// it runs, otherwise in the live service. A make argument, so it wins over APP of the project makefile.
+function preprodSupported(): bool
+{
+	return get('preprod_service')
+		&& test('sudo -n -l /usr/local/bin/dupd >/dev/null 2>&1 && sudo -n dupd rules | grep -q "^PREPROD"');
+}
+
+// php of the release being deployed: the preprod copy, null where there is none (preprod off, dupd
+// without preprod - the live service as before). A copy that should run but does not (crashed, host
+// restarted while the deploy paused - it has restart: no) is an error: falling back to the live
+// container would run the migrations on the previous image, the very thing preprod is there to avoid.
+function preprodPhp(): ?string
+{
+	if (!preprodSupported()) {
+		return null;
+	}
+	$copy = get('preprod_service') . '-next';
+	if (!test('[ "$(sudo container-running ' . escapeshellarg($copy) . ')" = true ]')) {
+		throw error("Preprod $copy is not running on {{alias}} - see `sudo dupd logs $copy`, then `make deploy` again (it starts the copy anew).");
+	}
+	return "sudo -E de $copy php";
+}
+
+// APP of adt/make for the console commands of the release being deployed. A make argument, so it
+// wins over APP of the project makefile.
 function preprodApp(): string
 {
-	$service = get('preprod_service');
-	if (!$service || !test('[ "$(sudo container-running ' . escapeshellarg($service . '-next') . ')" = true ]')) {
-		return '';
-	}
-	return ' APP=' . escapeshellarg('sudo -E de ' . $service . '-next php bin/console');
+	$php = preprodPhp();
+	return $php === null ? '' : ' APP=' . escapeshellarg("$php bin/console");
 }
 
 // The runtime has every ext-* of composer.json and composer.lock (adt/make check-extensions,
@@ -681,11 +722,11 @@ task('app:smoke_check', function () {
 			. " {$_ENV['PROJECT_NAME']}_nginx is not running (sudo dupd up). $skip");
 	}
 	if ($failure === 'curl') {
-		throw error("Smoke check of preprod on {{alias}} failed: curl exit $exit (28 = timeout) on $url - see `docker logs {$_ENV['PROJECT_NAME']}_nginx` / `{$_ENV['PROJECT_NAME']}_php`");
+		throw error("Smoke check of preprod on {{alias}} failed: curl exit $exit (28 = timeout) on $url - see `sudo dupd logs nginx` / `sudo dupd logs php-next` (preprod) or `php` without preprod");
 	}
 	if ($failure === 'status') {
 		throw error("Preprod of {{alias}} answered $code on $path (expected 2xx, 3xx, 401 or 403) - the release is broken,"
-			. " see `docker logs {$_ENV['PROJECT_NAME']}_php` and ~/project/shared/log. A path that is not public:"
+			. " see ~/project/shared/log and `sudo dupd logs php-next` (preprod; `php` without preprod). A path that is not public:"
 			. " set('smoke_check_path', '/<public page>') in deploy.php. $skip");
 	}
 	info("preprod $path: $code");

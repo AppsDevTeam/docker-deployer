@@ -156,6 +156,13 @@ before dupd) and only root could get it out. `deploy:failed` removes the copy,
 an unpublished one is replaced by the next deploy. dupd without `preprod` keeps
 the previous behaviour.
 
+Since 1.22 the extensions of the release are checked in the copy right after it
+starts (`make check-extensions CHECK_EXTENSIONS_PHP="sudo -E de php-next php"`,
+adt/make >= 1.9.5; older adt/make only in the publish), and a copy that should
+run but does not (crashed, host restarted during the pause - it has `restart: no`)
+fails the deploy instead of running the migrations in the live container. Its
+log: `sudo dupd logs php-next` (docker-binaries >= 3.22.1).
+
 The stage is an option, not a host selector - Deployer 8 passes options to its
 worker processes, the selector it does not. Without `-o stage` (`dep list`,
 `dep tree deploy`, which reject `-o`) only the tasks are defined.
@@ -181,7 +188,7 @@ Makefile targets:
 |---|---|---|
 | `secrets-decrypt SECRETS_STAGE=<stage>`, `_env STAGE=<stage>` | root | decrypt and assemble `.env` files in the temp clone |
 | `_prepare` | `project/` | `checkout` without migrations (clear, install, build); run with `CHECK_EXTENSIONS=0` |
-| `check-extensions` | `project/` | in `deploy:publish` after `dupd up`, before the symlink: the new runtime has every `ext-*` of the release |
+| `check-extensions` | `project/` | in `deploy:build` in the preprod copy (`CHECK_EXTENSIONS_PHP`, adt/make >= 1.9.5) and in `deploy:publish` after `dupd up`, before the symlink: the new runtime has every `ext-*` of the release |
 | `migrations` | `project/` | `MIGRATIONS_DRY_RUN=1` prints the plan and a `MIGRATIONS_PENDING` line, `MIGRATIONS_AUTO_CONFIRM=1` runs them; empty target without a DB |
 | `reload-consumers` | `project/` | after publish and when the maintenance starts; empty target without consumers |
 | `migrations-kill-sessions` | `project/` | optional, see below |
