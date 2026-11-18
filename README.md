@@ -121,7 +121,7 @@ without asking.
 Under the hood (`DEPLOYER_VERSION=8.0.5`):
 
 ```sh
-dep deploy:build -o stage=main     # code, `dupd build`, `make _prepare`, plan of migrations
+dep deploy:build -o stage=main     # code, `dupd build`, `make _prepare`, `dupd preprod start php`, plan of migrations
 dep deploy:finish -o stage=main    # migrations once per stage, smoke check of preprod, deploy:pause
 dep deploy:publish_check -o stage=main
 dep deploy:publish -o stage=main   # `dupd up`, symlink, crontab, reload-consumers, cleanup
@@ -139,6 +139,22 @@ host namespaces, capabilities, foreign mounts, networks or image names; services
 with bind mounts run under the UID of the account with no-new-privileges), so
 nobody has to run `make docker-upd` as root anymore. A host without dupd keeps
 the old behaviour: the containers are started and recreated by root by hand.
+
+Preprod on the new image (since 1.21, dupd of docker-binaries >= 3.22): after
+`app:prepare` the recipe starts `php-next`, a copy of the `php` service from the
+image just built (`sudo dupd preprod start php`, `set('preprod_service', ...)`,
+`false` = off), next to the live `php` that keeps the previous image until
+`dupd up` in `deploy:publish` (it removes the copy). The console commands of the
+release - the plan of migrations, the migrations, `migrations-kill-sessions` -
+run in it (`APP="sudo -E de php-next php bin/console"` for make) and the nginx of
+the project sends the preprod there (`include/root` of the sandbox: `$fpm` is
+`php-next:9000` for `X-Forwarded-Port: 4434`), so the smoke check and the manual
+check on port 4434 run on the runtime the release goes public with. Before, a
+release needing a new extension or PHP version ran its migrations in the old
+container (`could not find driver` on the first deploy over a stack started
+before dupd) and only root could get it out. `deploy:failed` removes the copy,
+an unpublished one is replaced by the next deploy. dupd without `preprod` keeps
+the previous behaviour.
 
 The stage is an option, not a host selector - Deployer 8 passes options to its
 worker processes, the selector it does not. Without `-o stage` (`dep list`,

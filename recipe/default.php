@@ -203,6 +203,7 @@ task('deploy:build', [
 	'app:release_temp',
 	'app:build_images',
 	'app:prepare',
+	'app:preprod_up',
 	'app:migrations_plan',
 	'app:built',
 ]);
@@ -331,11 +332,52 @@ task('app:build_images', function () {
 // Applies the docker configuration deployed to {{project_root}}/docker: `docker compose up` through
 // dupd recreates only the services whose image or configuration changed, the others keep running.
 // In deploy:publish right before deploy:symlink, so that a changed compose (e.g. a new mount)
-// never runs over the old release. First deploy: app:prepare starts the containers.
+// never runs over the old release. First deploy: app:prepare starts the containers. Removes the
+// preprod copy of app:preprod_up too (`--remove-orphans`).
 desc('Apply docker configuration');
 task('app:containers_up', function () {
 	runVisible('if sudo -n -l /usr/local/bin/dupd >/dev/null 2>&1; then sudo -n dupd up; fi');
 });
+
+// Preprod on the new image: dupd starts <preprod_service>-next from the image app:build_images just
+// built, the live service keeps the previous one until app:containers_up. The nginx of the project
+// sends X-Forwarded-Port 4434 there (include/root of the sandbox) and the console commands of the
+// release run in it (preprodApp()), so a release needing a new extension or PHP version is migrated
+// and smoke-checked on the runtime it goes public with - before, the dry run of the migrations ran
+// in the old container and failed (could not find driver) without a way out but root.
+// After app:prepare: its `dupd up` of the first deploy would remove the copy as an orphan.
+// dupd without preprod (docker-binaries < 3.22) keeps the previous behaviour. false = off.
+set('preprod_service', 'php');
+task('app:preprod_up', function () {
+	$service = get('preprod_service');
+	if (!$service) {
+		return;
+	}
+	runVisible('if sudo -n -l /usr/local/bin/dupd >/dev/null 2>&1; then'
+		. ' if sudo -n dupd rules | grep -q "^PREPROD"; then sudo -n dupd preprod start ' . escapeshellarg($service) . ';'
+		. ' else echo "dupd without preprod (docker-binaries < 3.22): preprod and migrations on the live service"; fi;'
+		. ' fi');
+})->hidden();
+
+// A failure must not stop the other deploy:failed tasks (unlock)
+task('app:preprod_down', function () {
+	try {
+		run('if sudo -n -l /usr/local/bin/dupd >/dev/null 2>&1 && sudo -n dupd rules | grep -q "^PREPROD"; then sudo -n dupd preprod stop; fi');
+	} catch (\Throwable $e) {
+		warning('dupd preprod stop failed on {{alias}}: ' . $e->getMessage());
+	}
+})->hidden();
+
+// APP of adt/make for the console commands of the release being deployed: in the preprod copy when
+// it runs, otherwise in the live service. A make argument, so it wins over APP of the project makefile.
+function preprodApp(): string
+{
+	$service = get('preprod_service');
+	if (!$service || !test('[ "$(sudo container-running ' . escapeshellarg($service . '-next') . ')" = true ]')) {
+		return '';
+	}
+	return ' APP=' . escapeshellarg('sudo -E de ' . $service . '-next php bin/console');
+}
 
 // The runtime has every ext-* of composer.json and composer.lock (adt/make check-extensions,
 // `php` of the running container - after app:containers_up that is the image built for this
@@ -499,7 +541,8 @@ task('app:migrations', function () {
 		maintenanceOff();
 	}
 
-	$plan = migrationsPlan();
+	$app = preprodApp();
+	$plan = migrationsPlan($app);
 	if (!output()->isVerbose()) {
 		writeln($plan);
 	}
@@ -512,7 +555,7 @@ task('app:migrations', function () {
 		$reason = migrationsMaintenanceReason($plan);
 		if ($reason === null) {
 			info('migrations change data only - without the maintenance window');
-			run(withLockHeartbeat('cd {{release_path}} && make migrations MIGRATIONS_AUTO_CONFIRM=1 MAINTENANCE_BYPASS=1'), timeout: 0);
+			run(withLockHeartbeat('cd {{release_path}} && make migrations MIGRATIONS_AUTO_CONFIRM=1 MAINTENANCE_BYPASS=1' . $app), timeout: 0);
 			return;
 		}
 
@@ -522,9 +565,9 @@ task('app:migrations', function () {
 		maintenanceOn();
 		try {
 			if (test('cd {{release_path}} && make -n migrations-kill-sessions >/dev/null 2>&1')) {
-				run(withLockHeartbeat('cd {{release_path}} && make migrations-kill-sessions MAINTENANCE_BYPASS=1 MIGRATIONS_KILL_WAIT={{migrations_kill_wait}}'), timeout: 0);
+				run(withLockHeartbeat('cd {{release_path}} && make migrations-kill-sessions MAINTENANCE_BYPASS=1 MIGRATIONS_KILL_WAIT={{migrations_kill_wait}}' . $app), timeout: 0);
 			}
-			run(withLockHeartbeat('cd {{release_path}} && make migrations MIGRATIONS_AUTO_CONFIRM=1 MAINTENANCE_BYPASS=1'), timeout: 0);
+			run(withLockHeartbeat('cd {{release_path}} && make migrations MIGRATIONS_AUTO_CONFIRM=1 MAINTENANCE_BYPASS=1' . $app), timeout: 0);
 		} finally {
 			maintenanceOff();
 		}
@@ -577,7 +620,7 @@ after('deploy:unlock', 'app:maintenance_off');
 task('app:migrations_plan', function () {
 	// output() instead of writeln(): writeln() passes the text through parse() and would take
 	// {{...}} in SQL for a variable
-	foreach (explode("\n", migrationsPlan()) as $line) {
+	foreach (explode("\n", migrationsPlan(preprodApp())) as $line) {
 		output()->writeln('[' . currentHost() . '] MIGRATIONS_PLAN> ' . $line);
 	}
 })->once()->hidden();
@@ -588,9 +631,9 @@ task('app:migrations_plan', function () {
 // in grep; `|| true` of grep, so that an empty plan is not an error. MAINTENANCE_BYPASS, so that
 // a maintenance file left by a killed deploy does not end the commands and hide the migrations.
 // Changes the directory itself, see app:migrations.
-function migrationsPlan(): string
+function migrationsPlan(string $app): string
 {
-	return run('set -o pipefail; cd {{release_path}} && make --no-print-directory migrations MIGRATIONS_DRY_RUN=1 MAINTENANCE_BYPASS=1 | { grep -v "^[[:space:]]*$" || true; }', timeout: 0);
+	return run('set -o pipefail; cd {{release_path}} && make --no-print-directory migrations MIGRATIONS_DRY_RUN=1 MAINTENANCE_BYPASS=1' . $app . ' | { grep -v "^[[:space:]]*$" || true; }', timeout: 0);
 }
 
 // Marks that deploy:build finished. Without it deploy:finish does not run the migrations (the
@@ -607,7 +650,8 @@ task('app:check_built', function () {
 
 // A release failing every request (missing vendor, broken .env, an error in Bootstrap) fails before
 // Tracy runs: nothing dedupes the error and it would show only after publish. One request to the
-// preprod of every host (the running nginx serves release/www for X-Forwarded-Port: 4434), after the
+// preprod of every host (the running nginx serves release/www for X-Forwarded-Port: 4434, through
+// the preprod copy of app:preprod_up when the nginx config of the project routes it there), after the
 // migrations the new code may need; a failure stops the deploy before deploy:pause, so make
 // deploy-publish refuses the release. Passes on 2xx, 3xx, 401 and 403 (smokeCheckFailure()).
 // false = off, otherwise the path requested - a project whose `/` is not public and answers
@@ -773,4 +817,5 @@ task('app:clean_temp', function () {
 fail('deploy:build', 'deploy:failed');
 fail('deploy:publish', 'deploy:failed');
 after('deploy:failed', 'app:clean_temp');
+after('deploy:failed', 'app:preprod_down');
 after('deploy:failed', 'deploy:unlock');
