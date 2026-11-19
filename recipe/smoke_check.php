@@ -25,3 +25,13 @@ function smokeCheckFailure(string $httpCode, string $curlExit): ?string
 	$code = (int) $httpCode;
 	return ($code >= 200 && $code < 400) || $code === 401 || $code === 403 ? null : 'status';
 }
+
+/**
+ * Host header of the smoke check. PROJECT_URL may list several domains separated by commas
+ * (adt/make: the TLS certificate gets them all, CN = the first) - sent whole as Host, a
+ * multi-tenant front controller picking the tenant by domain answers 404 for the unknown host.
+ */
+function smokeCheckHost(string $projectUrl): string
+{
+	return trim(explode(',', $projectUrl)[0]);
+}

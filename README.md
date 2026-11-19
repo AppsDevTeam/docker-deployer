@@ -96,7 +96,9 @@ deploy removed it after an hour, then the maintenance file in the middle of the
 DDL). The lock of a running or killed deploy stays - `make deploy-unlock`.
 
 After the migrations `deploy:finish` requests the preprod of every host (`curl` on
-`127.0.0.1:$NGINX_PORT` with `Host: $PROJECT_URL` and `X-Forwarded-Port: 4434`, so the running
+`127.0.0.1:$NGINX_PORT` with `Host:` the first domain of `PROJECT_URL` (a comma-separated list of
+several, as the TLS certificate of adt/make takes it - since 1.26, before the whole list went into the
+header and a multi-tenant front controller answered 404) and `X-Forwarded-Port: 4434`, so the running
 nginx serves `release/www`). It passes on 2xx, 3xx, 401 and 403 (a homepage behind a login or
 an IP allowlist still proves the release boots); any other status - 404 included, since 1.20,
 before only 5xx - fails the deploy before `deploy:pause`, so a release that fails every request
