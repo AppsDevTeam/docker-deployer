@@ -5,6 +5,7 @@
 require __DIR__ . '/../recipe/smoke_check.php';
 
 use function Deployer\smokeCheckFailure;
+use function Deployer\smokeCheckHost;
 
 $cases = [
 	'200' => ['200', '0', null],
@@ -38,5 +39,18 @@ foreach ($cases as $name => [$code, $exit, $expected]) {
 	$ok = $result === $expected;
 	$failed += $ok ? 0 : 1;
 	printf("%s %-22s %s\n", $ok ? 'OK  ' : 'FAIL', $name, $result ?? '(passes)');
+}
+
+// Host of the smoke check: the first of the comma-separated domains of PROJECT_URL
+$hosts = [
+	'www.sandbox.loc' => 'www.sandbox.loc',
+	'smiledent.adt.cool,dent.adt.cool,renome.adt.cool' => 'smiledent.adt.cool',
+	'a.example.com, b.example.com' => 'a.example.com',
+];
+foreach ($hosts as $projectUrl => $expected) {
+	$result = smokeCheckHost($projectUrl);
+	$ok = $result === $expected;
+	$failed += $ok ? 0 : 1;
+	printf("%s %-50s %s\n", $ok ? 'OK  ' : 'FAIL', "host of $projectUrl", $result);
 }
 exit($failed ? 1 : 0);

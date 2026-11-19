@@ -624,9 +624,10 @@ task('app:smoke_check', function () {
 		return;
 	}
 	$url = 'http://127.0.0.1:' . $_ENV['NGINX_PORT'] . $path;
+	$host = smokeCheckHost($_ENV['PROJECT_URL']);
 	// `; echo` - run() throws on a non-zero exit and the exit code of curl is what tells the cases apart
 	$result = trim(run('curl -s -o /dev/null -w "%{http_code}" --connect-timeout 10 --max-time 60'
-		. ' -H ' . escapeshellarg('Host: ' . $_ENV['PROJECT_URL'])
+		. ' -H ' . escapeshellarg('Host: ' . $host)
 		. ' -H "X-Forwarded-Port: 4434" -H "X-Forwarded-Proto: https"'
 		. ' ' . escapeshellarg($url) . '; echo " $?"'));
 	[$code, $exit] = array_pad(preg_split('/\s+/', $result), 2, '');
@@ -640,7 +641,7 @@ task('app:smoke_check', function () {
 		throw error("Smoke check of preprod on {{alias}} failed: curl exit $exit (28 = timeout) on $url - see `docker logs {$_ENV['PROJECT_NAME']}_nginx` / `{$_ENV['PROJECT_NAME']}_php`");
 	}
 	if ($failure === 'status') {
-		throw error("Preprod of {{alias}} answered $code on $path (expected 2xx, 3xx, 401 or 403) - the release is broken,"
+		throw error("Preprod of {{alias}} answered $code on $path (Host: $host; expected 2xx, 3xx, 401 or 403) - the release is broken,"
 			. " see `docker logs {$_ENV['PROJECT_NAME']}_php` and ~/project/shared/log. A path that is not public:"
 			. " set('smoke_check_path', '/<public page>') in deploy.php. $skip");
 	}
