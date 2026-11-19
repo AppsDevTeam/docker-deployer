@@ -171,7 +171,7 @@ asks itself, using the `MIGRATIONS_PLAN>` lines of `deploy:build`).
 
 ### What the project provides
 
-Env (`config/.env.common`, `config/.env.<stage>`, `config/docker/.env.<stage>`):
+Env (`config/.env.skeleton`, `config/.env.common`, `config/.env.<stage>`, `config/docker/.env.<stage>`):
 
 | Variable | |
 |---|---|

@@ -64,7 +64,7 @@ if ($stage !== null && $stage !== '') {
 function defineStage(string $stage): void
 {
 	// config/docker/.env.<stage> holds BRANCH in projects created from the sandbox
-	foreach (['config/.env.common', "config/.env.$stage", "config/docker/.env.$stage"] as $envFile) {
+	foreach (['config/.env.skeleton', 'config/.env.common', "config/.env.$stage", "config/docker/.env.$stage"] as $envFile) {
 		if (!file_exists($envFile)) {
 			if ($envFile === "config/.env.$stage") {
 				throw new \RuntimeException("Unknown stage $stage: $envFile does not exist");
