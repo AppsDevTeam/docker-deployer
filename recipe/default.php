@@ -13,6 +13,8 @@
 
 namespace Deployer;
 
+use Deployer\Exception\GracefulShutdownException;
+use Deployer\Exception\RunException;
 use Deployer\Host\Host;
 
 require 'recipe/common.php';
@@ -221,13 +223,24 @@ task('deploy:finish', [
 // every release has its own opcache keys and nothing has to be restarted.
 desc('Publish deploy');
 task('deploy:publish', [
+	'app:publish_start',
+	// Cron jobs paused and the running ones waited for, resumed after deploy:unlock (app:cron_resume).
+	// Before app:containers_up: `dupd up` recreates a service whose image changed and would kill the
+	// jobs running in it - and a publish that gives up waiting must not leave the previous release
+	// on the new image.
+	'app:cron_pause',
+	'app:cron_wait',
 	'app:containers_up',
 	'app:check_extensions',
 	'deploy:symlink',
 	'app:publish_done',
-	'deploy:unlock',
 	'app:crontab',
 	'app:reload_consumers',
+	'app:migrations_contract',
+	// After the contract migrations: they run under the deploy lock like app:migrations (another
+	// deploy would remove their maintenance file as stale), and the cron jobs are resumed
+	// (after deploy:unlock) only with the crontab of the new release installed
+	'deploy:unlock',
 	'deploy:cleanup',
 	'app:release_temp_cleanup',
 	'deploy:success',
@@ -332,8 +345,8 @@ task('app:build_images', function () {
 
 // Applies the docker configuration deployed to {{project_root}}/docker: `docker compose up` through
 // dupd recreates only the services whose image or configuration changed, the others keep running.
-// In deploy:publish right before deploy:symlink, so that a changed compose (e.g. a new mount)
-// never runs over the old release. First deploy: app:prepare starts the containers. Removes the
+// In deploy:publish right before deploy:symlink (only app:check_extensions in between), so that
+// a changed compose (e.g. a new mount) never runs over the old release. First deploy: app:prepare starts the containers. Removes the
 // preprod copy of app:preprod_up too (`--remove-orphans`).
 desc('Apply docker configuration');
 task('app:containers_up', function () {
@@ -343,7 +356,7 @@ task('app:containers_up', function () {
 // Preprod on the new image: dupd starts <preprod_service>-next from the image app:build_images just
 // built, the live service keeps the previous one until app:containers_up. The nginx of the project
 // sends X-Forwarded-Port 4434 there (include/root of the sandbox) and the console commands of the
-// release run in it (preprodApp()), so a release needing a new extension or PHP version is migrated
+// release run in it (preprodPhp()), so a release needing a new extension or PHP version is migrated
 // and smoke-checked on the runtime it goes public with - before, the dry run of the migrations ran
 // in the old container and failed (could not find driver) without a way out but root.
 // After app:prepare: its `dupd up` of the first deploy would remove the copy as an orphan.
@@ -381,6 +394,9 @@ task('app:check_extensions_preprod', function () {
 
 // A failure must not stop the other deploy:failed tasks (unlock)
 task('app:preprod_down', function () {
+	if (!get('lock_held')) {
+		return;
+	}
 	try {
 		if (preprodSupported()) {
 			run('cd ~ && sudo -n dupd preprod stop');
@@ -410,14 +426,6 @@ function preprodPhp(): ?string
 		throw error("Preprod $copy is not running on {{alias}} - see `sudo dupd logs $copy`, then `make deploy` again (it starts the copy anew).");
 	}
 	return "sudo -E de $copy php";
-}
-
-// APP of adt/make for the console commands of the release being deployed. A make argument, so it
-// wins over APP of the project makefile.
-function preprodApp(): string
-{
-	$php = preprodPhp();
-	return $php === null ? '' : ' APP=' . escapeshellarg("$php bin/console");
 }
 
 // The runtime has every ext-* of composer.json and composer.lock (adt/make check-extensions,
@@ -582,21 +590,125 @@ task('app:migrations', function () {
 		maintenanceOff();
 	}
 
-	$app = preprodApp();
-	$plan = migrationsPlan($app);
+	// In the preprod copy of php (the image of the release), see app:preprod_up
+	$php = preprodPhp();
+	runPendingMigrations('{{release_path}}', migrationsPhase('{{release_path}}', 'expand', $php), $php);
+})->once();
+
+// Expand and Contract pattern (adt/doctrine-components): a project that replaced `migrations:migrate`
+// with the command of the package has two phases of migrations. Expand ones are backward compatible
+// and run in deploy:finish, while the previous release is still live; contract ones remove what the
+// previous release needed and run in deploy:publish, after the switch of `current`
+// (app:migrations_contract). Any other project has no phases (null) - everything runs in
+// deploy:finish through its makefile, as before.
+//
+// Detected by the `--phase` option of the command, not by the package in vendor: the package is
+// installed in every project, the command is replaced only where the project's configuration says
+// so (`doctrineComponents: expandContract: true` or the service registered by hand). Asked once per
+// host and release - every question boots the console.
+//
+// $php: php of the release being deployed (preprodPhp()), null = the live service ({{bin/console}}) -
+// the published release (`current`) and hosts without preprod.
+function migrationsPhase(string $path, string $phase, ?string $php): ?string
+{
+	static $phased = [];
+
+	$key = currentHost()->getAlias() . ':' . parse($path);
+	$phased[$key] ??= migrationsPhased($path, $php);
+
+	return $phased[$key] ? $phase : null;
+}
+
+// Phases only when the help of the command shows --phase. The console says "no phases" with the
+// help (its `Usage:`) without --phase, or with the two messages of Symfony Console for a command
+// that does not exist (a project without a database). When it cannot tell - it fails for another
+// reason, or ends with 0 without printing the help - the migrations run the old way, without
+// phases (everything through `make migrations` in deploy:finish), with a warning and the output
+// of the console. Retried first: right after `dupd up` the php container may still be starting.
+function migrationsPhased(string $path, ?string $php): bool
+{
+	if (!test("[ -f $path/bin/console ]")) {
+		return false;
+	}
+
+	$command = "cd $path && out=\$(MAINTENANCE_BYPASS=1 " . migrationsConsole($php) . " migrations:migrate --help 2>&1); code=\$?; "
+		. "if echo \"\$out\" | grep -q -e '--phase'; then echo PHASES_ON; "
+		. "elif [ \$code -eq 0 ] && echo \"\$out\" | grep -q -e 'Usage:'; then echo PHASES_OFF; "
+		. "elif echo \"\$out\" | grep -q -F -e 'Command \"migrations:migrate\" is not defined' -e 'There are no commands defined in the \"migrations\" namespace'; then echo PHASES_OFF; "
+		. "else echo \"\$out\" | grep -v '^[[:space:]]*\$' | tail -n 20; echo PHASES_UNKNOWN; fi";
+
+	$output = '';
+	for ($attempt = 1; $attempt <= 3; $attempt++) {
+		$output = run($command);
+		if (str_ends_with($output, 'PHASES_ON')) {
+			return true;
+		}
+		if (str_ends_with($output, 'PHASES_OFF')) {
+			return false;
+		}
+		if ($attempt < 3) {
+			sleep(5);
+		}
+	}
+
+	// output() + escape(): the console output may contain {{...}} or <...>, see runPendingMigrations()
+	output()->writeln(\Symfony\Component\Console\Formatter\OutputFormatter::escape($output));
+	warning("Cannot tell whether the migrations of {{alias}} have the expand/contract phases: `migrations:migrate --help` in $path failed (output above) - running them the old way, without phases.");
+
+	return false;
+}
+
+// The command running the pending migrations of the release in $path. A phase goes to the console
+// command of adt/doctrine-components directly - the makefile contract has no place for it, so what
+// the project's `migrations` target does on top (more databases, own options) is not run.
+// --allow-no-migration: a project without any migration yet is not an error, as in the makefiles.
+function migrationsCommand(string $path, ?string $phase, ?string $php): string
+{
+	return $phase === null
+		? "cd $path && make migrations MIGRATIONS_AUTO_CONFIRM=1 MAINTENANCE_BYPASS=1" . migrationsApp($php)
+		: "cd $path && MAINTENANCE_BYPASS=1 " . migrationsConsole($php) . " migrations:migrate --no-interaction --allow-no-migration -vv --phase=$phase";
+}
+
+// The console of the release: in the preprod copy of php when there is one, otherwise the live service
+function migrationsConsole(?string $php): string
+{
+	return $php === null ? '{{bin/console}}' : "$php bin/console";
+}
+
+// The same as APP of adt/make for the targets of the makefile. A make argument, so it wins over
+// APP of the project makefile.
+function migrationsApp(?string $php): string
+{
+	return $php === null ? '' : ' APP=' . escapeshellarg("$php bin/console");
+}
+
+// Shows the plan of the pending migrations of the release in $path, asks for confirmation and runs
+// them - in the maintenance window when they touch the structure of existing tables.
+function runPendingMigrations(string $path, ?string $phase, ?string $php): void
+{
+	$plan = migrationsPlan($path, $phase, $php);
 	if (!output()->isVerbose()) {
 		writeln($plan);
 	}
 	if (str_contains($plan, 'MIGRATIONS_PENDING')) {
 		if (!get('migrations_auto_confirm') && !askConfirmation('Are the migrations ok?')) {
-			throw error('Migrations not confirmed. Without asking: make deploy -- <stage> DEP_ARGS="-o migrations_auto_confirm=true"');
+			// The contract phase runs in deploy:publish, with the release already live - `make deploy`
+			// would not run it
+			throw error($phase === 'contract'
+				? 'Contract migrations not confirmed - the release is published without them. Run them: dep app:migrations_contract -o stage={{stage}} -o migrations_auto_confirm=true'
+				: 'Migrations not confirmed. Without asking: make deploy -- <stage> DEP_ARGS="-o migrations_auto_confirm=true"');
 		}
 		// Data migrations (DML, CREATE TABLE without a foreign key) do not touch the structure of
-		// existing tables - no metadata lock conflict, so no maintenance window (recipe/maintenance.php)
-		$reason = migrationsMaintenanceReason($plan);
+		// existing tables - no metadata lock conflict, so no maintenance window (recipe/maintenance.php).
+		// Expand migrations are backward compatible and run under the live previous release, a window
+		// for every new column would make the pattern pointless - but compatible is not the same as
+		// free of the metadata lock conflict, so a foreign key (the statement that crashed a node)
+		// still gets the window.
+		$expand = $phase === 'expand';
+		$reason = migrationsMaintenanceReason($plan, foreignKeysOnly: $expand);
 		if ($reason === null) {
-			info('migrations change data only - without the maintenance window');
-			run(withLockHeartbeat('cd {{release_path}} && make migrations MIGRATIONS_AUTO_CONFIRM=1 MAINTENANCE_BYPASS=1' . $app), timeout: 0);
+			info($expand ? 'expand migrations without a foreign key - without the maintenance window' : 'migrations change data only - without the maintenance window');
+			run(withLockHeartbeat(migrationsCommand($path, $phase, $php)), timeout: 0);
 			return;
 		}
 
@@ -607,14 +719,32 @@ task('app:migrations', function () {
 		// maintenance file behind
 		try {
 			maintenanceOn();
-			if (test('cd {{release_path}} && make -n migrations-kill-sessions >/dev/null 2>&1')) {
-				run(withLockHeartbeat('cd {{release_path}} && make migrations-kill-sessions MAINTENANCE_BYPASS=1 MIGRATIONS_KILL_WAIT={{migrations_kill_wait}}' . $app), timeout: 0);
+			if (test("cd $path && make -n migrations-kill-sessions >/dev/null 2>&1")) {
+				run(withLockHeartbeat("cd $path && make migrations-kill-sessions MAINTENANCE_BYPASS=1 MIGRATIONS_KILL_WAIT={{migrations_kill_wait}}" . migrationsApp($php)), timeout: 0);
 			}
-			run(withLockHeartbeat('cd {{release_path}} && make migrations MIGRATIONS_AUTO_CONFIRM=1 MAINTENANCE_BYPASS=1' . $app), timeout: 0);
+			run(withLockHeartbeat(migrationsCommand($path, $phase, $php)), timeout: 0);
 		} finally {
 			maintenanceOff();
 		}
 	}
+}
+
+// Contract phase (see migrationsPhase()): after the switch of `current` the code that no longer
+// uses the old schema runs on all hosts, so the contract migrations of the live release may run.
+// Also available on its own, e.g. after a failed attempt:
+// `dep app:migrations_contract -o stage=<stage>`.
+//
+// A project without the phases has no contract phase - all its migrations ran in
+// app:migrations - and the task does nothing, not even the dry-run.
+desc('Run contract migrations of the published release');
+task('app:migrations_contract', function () {
+	// php: null - app:containers_up replaced the preprod copy, the live service runs the new image
+	$phase = migrationsPhase('{{current_path}}', 'contract', null);
+	if ($phase === null) {
+		return;
+	}
+
+	runPendingMigrations('{{current_path}}', $phase, null);
 })->once();
 
 // Maintenance flag of the stage, one per host. Outside the releases: the migrations run from the
@@ -667,7 +797,14 @@ after('deploy:unlock', 'app:maintenance_off');
 task('app:migrations_plan', function () {
 	// output() instead of writeln(): writeln() passes the text through parse() and would take
 	// {{...}} in SQL for a variable
-	foreach (explode("\n", migrationsPlan(preprodApp())) as $line) {
+	// Both phases, so that the confirmation of the deploy covers what deploy:publish will run too.
+	// In the preprod copy of php (app:preprod_up), like the migrations themselves.
+	$php = preprodPhp();
+	$plan = migrationsPlan('{{release_path}}', migrationsPhase('{{release_path}}', 'expand', $php), $php);
+	if (migrationsPhase('{{release_path}}', 'contract', $php) !== null) {
+		$plan .= "\n== contract migrations, run by deploy:publish ==\n" . migrationsPlan('{{release_path}}', 'contract', $php);
+	}
+	foreach (explode("\n", $plan) as $line) {
 		output()->writeln('[' . currentHost() . '] MIGRATIONS_PLAN> ' . $line);
 	}
 })->once()->hidden();
@@ -678,9 +815,20 @@ task('app:migrations_plan', function () {
 // in grep; `|| true` of grep, so that an empty plan is not an error. MAINTENANCE_BYPASS, so that
 // a maintenance file left by a killed deploy does not end the commands and hide the migrations.
 // Changes the directory itself, see app:migrations.
-function migrationsPlan(string $app): string
+// With a phase the dry-run of the console command is the plan and the MIGRATIONS_PENDING line is
+// added here, the way the project's makefile does it (migrationsPhasePending(), recipe/maintenance.php).
+function migrationsPlan(string $path, ?string $phase, ?string $php): string
 {
-	return run('set -o pipefail; cd {{release_path}} && make --no-print-directory migrations MIGRATIONS_DRY_RUN=1 MAINTENANCE_BYPASS=1' . $app . ' | { grep -v "^[[:space:]]*$" || true; }', timeout: 0);
+	$dryRun = $phase === null
+		? "cd $path && make --no-print-directory migrations MIGRATIONS_DRY_RUN=1 MAINTENANCE_BYPASS=1" . migrationsApp($php)
+		: migrationsCommand($path, $phase, $php) . ' --dry-run 2>&1';
+	$plan = run('set -o pipefail; ' . $dryRun . ' | { grep -v "^[[:space:]]*$" || true; }', timeout: 0);
+
+	if ($phase !== null && migrationsPhasePending($plan)) {
+		$plan .= "\nMIGRATIONS_PENDING";
+	}
+
+	return $plan;
 }
 
 // Marks that deploy:build finished. Without it deploy:finish does not run the migrations (the
@@ -766,17 +914,45 @@ task('app:publish_done', function () {
 	run('rm -f {{deploy_path}}/.dep/deploy.paused');
 })->hidden();
 
+// A publish in progress: until deploy:symlink the lock still has its deploy.paused mark and
+// app:unlock_own of another `make deploy` would take it for a finished deploy and release it - while
+// the publish waits for the cron jobs (up to cron_wait_timeout) the `release` symlink would get
+// repointed to an unbuilt release and published. Removed with the lock.
+//
+// The mark protects only together with the lock (app:unlock_own drops the marks when nobody holds
+// it), and a publish repeated after a failed one has none - deploy:failed released it. So the
+// publish takes the lock when it is free; a lock that exists belongs to the deploy being published
+// (deploy.paused is there - a deploy that started meanwhile removed it). Checked once more here, in
+// one command with taking the lock: deploy:publish_check ran in another process, a deploy may have
+// started since. GracefulShutdownException: deploy:failed must not run and unlock that deploy.
+task('app:publish_start', function () {
+	$dep = '{{deploy_path}}/.dep';
+	$state = run("if [ -f $dep/deploy.paused ] && [ -L {{deploy_path}}/release ]; then "
+		. "[ -f $dep/deploy.lock ] || echo " . quote(get('user')) . " > $dep/deploy.lock; "
+		. "touch $dep/deploy.publishing; touch -c $dep/deploy.lock; echo +ready; else echo +unfinished; fi");
+	if ($state !== '+ready') {
+		throw new GracefulShutdownException(parse('Deploy of stage {{stage}} on {{alias}} did not finish (.dep/deploy.paused or the release symlink is missing) - run `make deploy` again.'));
+	}
+	set('lock_held', true);
+})->hidden();
+
+task('app:publish_end', function () {
+	run('rm -f {{deploy_path}}/.dep/deploy.publishing');
+})->hidden();
+after('deploy:unlock', 'app:publish_end');
+
 // `make deploy` ends with deploy:pause and the lock is released by deploy:publish. A repeated
 // deploy without publish (a fix before publishing, more stages at once, unconfirmed migrations)
 // would fail on "Deploy locked". So the own lock (same `user`) is released, but only when the
 // deploy holding it reached the end of deploy:build (deploy.built) or deploy:pause
-// (deploy.paused). The lock of a running or interrupted deploy - even an own one, e.g. from
-// another terminal - and somebody else's lock stay. The marks are deleted so that the next
+// (deploy.paused) and is not being published (deploy.publishing). The lock of a running or
+// interrupted deploy - even an own one, e.g. from another terminal - and somebody else's lock stay. The marks are deleted so that the next
 // running deploy does not inherit them - but only when nobody holds the lock: a locked deploy
 // fails on deploy:lock anyway and the marks belong to the lock holder.
 //
-// A lock of somebody else is removed only when its deploy finished (deploy.paused) and has been
-// idle for lock_stale_minutes - a release nobody published. The age is the time since the last
+// A lock of somebody else is removed only when its deploy finished (deploy.paused), is not being
+// published (deploy.publishing - a publish killed in the middle needs `make deploy-unlock`) and has
+// been idle for lock_stale_minutes - a release nobody published. The age is the time since the last
 // activity (withLockHeartbeat, deploy:pause), not since the start: before 1.18 the lock of a
 // deploy running migrations or waiting for [y/N] longer than an hour was removed, and the second
 // deploy deleted the maintenance file in the middle of the DDL and replaced the `release` symlink.
@@ -785,12 +961,13 @@ task('app:unlock_own', function () {
 	$lockFile = '{{deploy_path}}/.dep/deploy.lock';
 	$builtFile = '{{deploy_path}}/.dep/deploy.built';
 	$pausedFile = '{{deploy_path}}/.dep/deploy.paused';
-	if (test("[ -f $lockFile ] && { [ -f $builtFile ] || [ -f $pausedFile ]; } && [ \"\$(cat $lockFile)\" = " . quote(get('user')) . " ]")) {
+	$publishingFile = '{{deploy_path}}/.dep/deploy.publishing';
+	if (test("[ -f $lockFile ] && [ ! -f $publishingFile ] && { [ -f $builtFile ] || [ -f $pausedFile ]; } && [ \"\$(cat $lockFile)\" = " . quote(get('user')) . " ]")) {
 		run("rm -f $lockFile");
 		info('removed own deploy lock');
 	}
 	$staleMinutes = (int) get('lock_stale_minutes');
-	if ($staleMinutes > 0 && test("[ -f $lockFile ] && [ -f $pausedFile ] && [ -n \"\$(find $lockFile -mmin +$staleMinutes)\" ]")) {
+	if ($staleMinutes > 0 && test("[ -f $lockFile ] && [ -f $pausedFile ] && [ ! -f $publishingFile ] && [ -n \"\$(find $lockFile -mmin +$staleMinutes)\" ]")) {
 		$holder = run("cat $lockFile");
 		$age = run("echo \$(( (\$(date +%s) - \$(stat -c %Y $lockFile)) / 60 ))");
 		run("rm -f $lockFile");
@@ -799,7 +976,7 @@ task('app:unlock_own', function () {
 	if (test("[ -f $lockFile ]")) {
 		return;
 	}
-	run("rm -f $builtFile $pausedFile");
+	run("rm -f $builtFile $pausedFile $publishingFile");
 })->hidden();
 
 // Installed on all hosts. Jobs run only on one of them: cronie in cluster mode (crond -c, service
@@ -821,6 +998,134 @@ task('app:crontab', function () {
 		run('sudo -n crontab-all -r');
 	}
 });
+
+// Cron jobs must not run across the switch of the `current` symlink - a job would start in one
+// release and finish in another (README, Cron jobs during publish). It needs a wrapper the jobs of
+// the crontab are started through; a project whose installed crontab does not use it is left
+// alone - nothing is paused, checked or waited for.
+
+// How long the publish waits for the running cron jobs to finish
+set('cron_wait_timeout', 1800);
+
+// The crontab is installed on all hosts and only cronie in cluster mode runs the jobs once.
+// `-o cron_cluster_check=false` skips the check (a stage with a single host).
+set('cron_cluster_check', true);
+
+// The wrapper, as it appears in the installed crontab
+set('cron_wrapper', 'bin/cron');
+
+// Before the switch (in deploy:publish before app:containers_up and deploy:symlink) the jobs are paused
+// (.dep/cron.pause, the wrapper waits) and the running ones are waited for (shared lock
+// .dep/cron.lock). The crontab is installed on all hosts, so both run everywhere.
+
+// The file holds the budget of the pause in seconds and is refreshed while waiting. When it is
+// exceeded (a killed publish), the wrapper resumes the jobs itself.
+task('app:cron_pause', function () {
+	cronPause((int) get('cron_wait_timeout'), strict: true);
+})->hidden();
+
+// The wrapper holds the lock shared while a job runs, the exclusive one is free once all finished.
+// Only on a host paused by app:cron_pause.
+task('app:cron_wait', function () {
+	cronWait((int) get('cron_wait_timeout'), strict: true);
+})->hidden();
+
+// The wrapper is looked for in the installed crontab of the account and in its crontab-all file in
+// /etc/cron.d (see app:crontab), commented lines aside. Not strict (rollback): what would stop
+// a publish is only a warning.
+function cronPause(int $timeout, bool $strict): void
+{
+	$wrapper = quote(get('cron_wrapper') . ' ');
+	$state = explode("\n", run("crontab -l 2>/dev/null | grep -v '^[[:space:]]*#' | grep -q $wrapper && echo wrapper; "
+		. "grep -v '^[[:space:]]*#' /etc/cron.d/crontab-all-\$(id -un) 2>/dev/null | grep -q $wrapper && echo wrapper-all; "
+		. "hash flock crontab 2>/dev/null && echo tools-ok; crontab -c 2>/dev/null | grep -q . && echo cluster; true"));
+	if (!in_array('wrapper', $state, true) && !in_array('wrapper-all', $state, true)) {
+		return;
+	}
+
+	if (!in_array('tools-ok', $state, true)) {
+		if ($strict) {
+			throw error('flock or crontab is not available on {{alias}}.');
+		}
+		warning('flock or crontab is not available on {{alias}} - cron jobs are not paused');
+
+		return;
+	}
+
+	// Only the crontab of the account depends on the cluster mode, crontab-all jobs run on every
+	// host on purpose
+	if (in_array('wrapper', $state, true) && !in_array('cluster', $state, true) && filter_var(get('cron_cluster_check'), FILTER_VALIDATE_BOOLEAN)) {
+		$message = 'cronie cluster mode is not reported by `crontab -c` on {{alias}}, with the crontab installed on every host the jobs would run more than once.';
+		if ($strict) {
+			throw error("$message Use -o cron_cluster_check=false to skip the check.");
+		}
+		warning($message);
+	}
+
+	run('echo ' . ($timeout + 600) . ' > {{deploy_path}}/.dep/cron.pause');
+}
+
+function cronWait(int $timeout, bool $strict): void
+{
+	if (!test('[ -f {{deploy_path}}/.dep/cron.pause ]')) {
+		return;
+	}
+
+	writeln("Waiting up to $timeout s for running cron jobs to finish.");
+	try {
+		// The heartbeat: the wait may be longer than lock_stale_minutes
+		run(withLockHeartbeat("touch {{deploy_path}}/.dep/cron.pause && flock -E 124 -x -w $timeout {{deploy_path}}/.dep/cron.lock touch {{deploy_path}}/.dep/cron.pause"), timeout: $timeout + 60);
+	} catch (RunException $e) {
+		if ($e->getExitCode() !== 124) {
+			throw $e;
+		}
+		if ($strict) {
+			throw error("Cron jobs did not finish within $timeout seconds.");
+		}
+		warning("Cron jobs on {{alias}} did not finish within $timeout seconds - going on, they finish in the release they did not start in");
+	}
+}
+
+desc('Resume cron jobs paused by a publish');
+task('app:cron_resume', function () {
+	run('rm -f {{deploy_path}}/.dep/cron.pause');
+});
+
+// The pause ends with the release of the deploy lock: at the end of deploy:publish
+// (after app:crontab, so that the resumed jobs start from the crontab of the new release), after
+// a failed publish (deploy:failed -> app:unlock_failed) and with `make deploy-unlock`. Not through
+// fail() of the publish - another fail() would replace it.
+after('deploy:unlock', 'app:cron_resume');
+
+// A rollback switches `current` the same way as a publish and needs the crontab of the release it
+// switched to. It is run when the live release is broken, so the cron jobs must not stop it: they
+// are waited for only shortly and a job that does not finish (maybe hung because of the release),
+// a missing tool or the cluster check are a warning, not an error.
+set('cron_rollback_wait_timeout', 60);
+
+// Any failure, not only the expected ones: a leftover cron.pause on a host without flock, a lock
+// file that cannot be opened, a crontab that cannot be read ...
+task('app:cron_pause_rollback', function () {
+	try {
+		cronPause((int) get('cron_rollback_wait_timeout'), strict: false);
+	} catch (\Throwable $e) {
+		warning('Cron jobs on {{alias}} not paused, the rollback goes on: ' . $e->getMessage());
+	}
+})->hidden();
+
+task('app:cron_wait_rollback', function () {
+	try {
+		cronWait((int) get('cron_rollback_wait_timeout'), strict: false);
+	} catch (\Throwable $e) {
+		warning('Cron jobs on {{alias}} not waited for, the rollback goes on: ' . $e->getMessage());
+	}
+})->hidden();
+
+task('app:cron_quiesce_rollback', ['app:cron_pause_rollback', 'app:cron_wait_rollback'])->hidden();
+before('rollback', 'app:cron_quiesce_rollback');
+after('rollback', 'app:crontab');
+after('rollback', 'app:cron_resume');
+fail('rollback', 'app:cron_resume');
 
 // Restarts the background-queue consumers so that they run the new code. A project without
 // consumers has an empty `reload-consumers` target.
@@ -855,7 +1160,34 @@ task('deploy:release_check', function () {
 // of the failed attempt need not be known in this run; it cannot hit a concurrent deploy - with
 // a locked deploy (GracefulShutdownException) Deployer 8 does not run deploy:failed.
 task('app:clean_temp', function () {
+	if (!get('lock_held')) {
+		return;
+	}
 	run('rm -rf {{project_root}}/release_*_temp');
+})->hidden();
+
+// Whether this run holds the deploy lock: set after deploy:lock and by app:publish_start (the host
+// config is carried from task to task by the main process). A run that failed before it - an SSH
+// error in deploy:setup, app:unlock_own - owns nothing on the host: the lock, the cron pause, the
+// publishing mark, the maintenance file and the preprod copy there belong to somebody else's
+// deploy or publish, maybe a running one, and deploy:failed must leave them alone.
+set('lock_held', false);
+task('app:lock_held', function () {
+	set('lock_held', true);
+})->hidden();
+after('deploy:lock', 'app:lock_held');
+
+// deploy:unlock with the tasks hooked after it (after('deploy:unlock', ...)) - invoke() does not
+// run hooks, so they are listed here too
+task('app:unlock_failed', function () {
+	if (!get('lock_held')) {
+		warning('{{alias}}: failed before taking the deploy lock - the lock on the host (if any) is not released');
+		return;
+	}
+	invoke('deploy:unlock');
+	invoke('app:maintenance_off');
+	invoke('app:publish_end');
+	invoke('app:cron_resume');
 })->hidden();
 
 // The fail hook is looked up by the name of the started task, `make deploy` runs
@@ -866,4 +1198,4 @@ fail('deploy:build', 'deploy:failed');
 fail('deploy:publish', 'deploy:failed');
 after('deploy:failed', 'app:clean_temp');
 after('deploy:failed', 'app:preprod_down');
-after('deploy:failed', 'deploy:unlock');
+after('deploy:failed', 'app:unlock_failed');

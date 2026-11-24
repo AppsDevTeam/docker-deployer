@@ -15,10 +15,14 @@ namespace Deployer;
  * calling the connection directly, the dry-run does not show it) or a plan without any migration
  * block needs it too. `DO SLEEP(...)` is a test migration of the maintenance window - it needs it.
  *
+ * $foreignKeysOnly (expand migrations, which run under the live release on purpose): only a statement
+ * with a foreign key needs the window - the one that crashed a node - and the test migration. Other
+ * DDL and a migration without SQL run without it.
+ *
  * Reads the Doctrine Migrations dry-run with -vv: `++ migrating <version>`, `[debug] <sql>` and
  * `Migration <version> migrated`. Long lines may be wrapped, continuation lines are joined.
  */
-function migrationsMaintenanceReason(string $plan): ?string
+function migrationsMaintenanceReason(string $plan, bool $foreignKeysOnly = false): ?string
 {
 	$migrations = 0;
 	$current = null;
@@ -26,12 +30,12 @@ function migrationsMaintenanceReason(string $plan): ?string
 	$statement = null;
 	$reason = null;
 
-	$flush = function () use (&$statement, &$statements, &$reason, &$current): void {
+	$flush = function () use (&$statement, &$statements, &$reason, &$current, $foreignKeysOnly): void {
 		if ($statement === null) {
 			return;
 		}
 		$statements++;
-		$reason ??= ddlReason($statement, (string) $current);
+		$reason ??= ddlReason($statement, (string) $current, $foreignKeysOnly);
 		$statement = null;
 	};
 
@@ -47,7 +51,7 @@ function migrationsMaintenanceReason(string $plan): ?string
 			$statement = [$m[1]];
 		} elseif (preg_match('/Migration (\S+) migrated/', $trimmed)) {
 			$flush();
-			if ($statements === 0) {
+			if ($statements === 0 && !$foreignKeysOnly) {
 				$reason ??= "$current: no SQL in the plan (logic in PHP?)";
 			}
 			$current = null;
@@ -59,7 +63,7 @@ function migrationsMaintenanceReason(string $plan): ?string
 	}
 	$flush();
 
-	if ($migrations === 0 && str_contains($plan, 'MIGRATIONS_PENDING')) {
+	if ($migrations === 0 && !$foreignKeysOnly && str_contains($plan, 'MIGRATIONS_PENDING')) {
 		return 'pending migrations without SQL in the plan';
 	}
 
@@ -67,9 +71,28 @@ function migrationsMaintenanceReason(string $plan): ?string
 }
 
 /**
+ * Whether the dry-run of `migrations:migrate --phase=<phase>` (adt/doctrine-components) has anything
+ * to run. A migration in the plan (`++ migrating`) says yes; no only the two messages of the command
+ * for "nothing to do" - `Already at the latest version` (also of an empty phase, with ` - phase <phase>`
+ * appended) and `there are no registered migrations`. The messages are printed in a block wrapped
+ * to the width of the terminal (80 without one), each line prefixed, so they are matched with the
+ * whitespace and the prefix of the block collapsed. Anything else counts as pending: an unknown
+ * output must not skip the migrations silently.
+ */
+function migrationsPhasePending(string $dryRun): bool
+{
+	if (preg_match('/\+\+ migrating \S/', $dryRun)) {
+		return true;
+	}
+	$text = preg_replace('/[\s!]+/', ' ', $dryRun);
+
+	return !str_contains($text, 'Already at the latest version') && !str_contains($text, 'there are no registered migrations');
+}
+
+/**
  * @param list<string> $lines statement split by wrapping
  */
-function ddlReason(array $lines, string $migration): ?string
+function ddlReason(array $lines, string $migration, bool $foreignKeysOnly = false): ?string
 {
 	// Joined with a space and without one - wrapping may split a word (REFERE|NCES)
 	$spaced = strtoupper(preg_replace('/\s+/', ' ', implode(' ', $lines)));
@@ -82,10 +105,8 @@ function ddlReason(array $lines, string $migration): ?string
 	if (preg_match('/^(INSERT|UPDATE|DELETE|REPLACE|SELECT|SET|DO)\b/', $spaced)) {
 		return null;
 	}
-	if (preg_match('/^CREATE\s+TABLE\b/', $spaced)
-		&& !preg_match('/\b(REFERENCES|FOREIGN\s+KEY)\b/', $spaced)
-		&& !str_contains($glued, 'REFERENCES')
-	) {
+	$foreignKey = preg_match('/\b(REFERENCES|FOREIGN\s+KEY)\b/', $spaced) || str_contains($glued, 'REFERENCES');
+	if (!$foreignKey && ($foreignKeysOnly || preg_match('/^CREATE\s+TABLE\b/', $spaced))) {
 		return null;
 	}
 

@@ -93,7 +93,19 @@ The idle time counts from the last activity: long commands (build, migrations)
 renew the lock every minute and `deploy:pause` once more, so migrations running
 for hours or a deploy waiting for `[y/N]` keep their lock (before 1.18 a second
 deploy removed it after an hour, then the maintenance file in the middle of the
-DDL). The lock of a running or killed deploy stays - `make deploy-unlock`.
+DDL). The lock of a running or killed deploy stays - `make deploy-unlock`. A deploy
+that is being published (`.dep/deploy.publishing`, e.g. while it waits for the
+cron jobs) keeps its lock as well, whoever holds it and however old it is - a
+publish killed in the middle needs `make deploy-unlock`. `deploy:publish` takes
+the lock itself when nobody holds it (a publish repeated after a failed one), so
+a `make deploy` started meanwhile stops on "Deploy locked" instead of repointing
+the `release` symlink under it.
+
+A failed `deploy:build` or `deploy:publish` releases the lock (with the
+maintenance file, the pause of the cron jobs and the preprod copy) only when
+that run took it. A run that failed earlier - e.g. an SSH error in
+`deploy:setup` - leaves the host as it is: what is there belongs to somebody
+else's deploy or publish.
 
 After the migrations `deploy:finish` requests the preprod of every host (`curl` on
 `127.0.0.1:$NGINX_PORT` with `Host:` the first domain of `PROJECT_URL` (a comma-separated list of
@@ -126,7 +138,7 @@ Under the hood (`DEPLOYER_VERSION=8.0.5`):
 dep deploy:build -o stage=main     # code, `dupd build`, `make _prepare`, `dupd preprod start php`, plan of migrations
 dep deploy:finish -o stage=main    # migrations once per stage, smoke check of preprod, deploy:pause
 dep deploy:publish_check -o stage=main
-dep deploy:publish -o stage=main   # `dupd up`, symlink, crontab, reload-consumers, cleanup
+dep deploy:publish -o stage=main   # cron jobs paused, `dupd up`, symlink, crontab, reload-consumers, contract migrations, cleanup
 ```
 
 Containers: with `dupd` of [adt/docker-binaries](https://git.appsdevteam.com/adt/docker-binaries)
@@ -211,6 +223,105 @@ Files and servers:
   automatically.
 - Long commands (`make _prepare`, migrations) have no timeout.
 
+### Expand and Contract migrations
+
+For projects that replaced `migrations:migrate` with the command of
+[adt/doctrine-components](https://github.com/AppsDevTeam/doctrine-components#expand-and-contract-migrations)
+(`doctrineComponents: expandContract: true`, or
+`ADT\DoctrineComponents\Console\MigrateCommand` registered by hand): a
+migration is either *expand* (backward compatible, the old code keeps working)
+or *contract* (removes what the old code needed). When `migrations:migrate` of
+the release has the `--phase` option, the recipe runs the two phases
+separately, through the console command (`migrations:migrate --phase=<phase>`)
+instead of `make migrations`. The package alone is not enough - it is installed
+in every project, the phases are switched on by the configuration:
+
+| Phase | Task | When |
+|---|---|---|
+| expand | `app:migrations` in `deploy:finish` | before the publish, the previous release is still live |
+| contract | `app:migrations_contract` in `deploy:publish` | after the switch of `current` on all hosts, with the new crontab installed and the consumers reloaded, still under the deploy lock |
+
+Both show the plan and ask for confirmation. The contract phase uses the
+maintenance window when its plan touches the structure of existing tables (see
+below). Expand migrations run under the live previous release on purpose, so
+they get the window only for a statement with a foreign key - backward
+compatible does not mean free of the metadata lock conflict, and a foreign key
+is what crashed a node. Other expand DDL (a new column, a new index) runs
+without the window: it holds the metadata lock shortly and may abort
+a transaction of the running application that uses the table. The plan printed
+by `deploy:build` contains both phases, so the confirmation of the deploy
+covers the contract migrations of the publish as well.
+
+The plan is the dry-run of the same command. It fails when an expand migration
+contains a change that breaks the old code (`DROP` of a column or table,
+a rename, `NOT NULL`), so `deploy:build` stops with the reason before anything
+runs - such a change belongs to a contract migration.
+
+The phases go to the console command directly (`--no-interaction
+--allow-no-migration -vv --phase=<phase>`), not through `make migrations` -
+whatever the project's target does on top (more databases, its own options) is
+not run. A project has phases only when the help of `migrations:migrate` shows
+`--phase`. When the console cannot answer (it fails, or prints no help), the
+deploy warns, prints its output and runs the migrations the old way, without
+phases: everything through `make migrations` in `deploy:finish`, and
+`app:migrations_contract` does nothing.
+
+When the contract phase fails, the publish fails with the new release already
+live; fix the cause and run `dep app:migrations_contract -o stage=<stage>`
+(with `-o migrations_auto_confirm=true` where nobody can answer the question -
+contract migrations that were not confirmed fail the publish the same way).
+Once it ran, the previous release no longer works with the database -
+a rollback needs its own migration back.
+
+A project without the `--phase` option is not affected: `app:migrations`
+runs everything through `make migrations` as before and
+`app:migrations_contract` returns right away, without the dry-run.
+
+### Cron jobs during publish
+
+A cron job must not run across the switch of the `current` symlink - it would
+start in one release and finish in another. When the crontab installed on
+the host starts its jobs through the wrapper `cron` of adt/docker-binaries
+(`/usr/local/bin/cron <command>`; another name is set with `cron_wrapper`), then at the start of
+`deploy:publish` - before `dupd up`, which would kill the jobs running in
+a recreated container, and before `deploy:symlink` - and before `rollback`, on
+**all** hosts of the stage:
+
+1. `app:cron_pause` writes `~/project/.dep/cron.pause` - jobs that start now
+   wait,
+2. `app:cron_wait` waits up to `cron_wait_timeout` seconds (default 1800) for
+   the running jobs to finish (exclusive lock on `~/project/.dep/cron.lock`);
+   the publish fails when they do not.
+
+`app:cron_resume` removes the file after `deploy:unlock` - at the end of the
+publish (after `app:crontab`, so the resumed jobs start from the crontab of the
+new release, and after the contract migrations), after a failed publish and
+with `make deploy-unlock` - and after a rollback, which also installs the
+crontab of the release it switched to.
+
+A rollback is run when the live release is broken, so the cron jobs do not stop
+it: the running jobs are waited for only `cron_rollback_wait_timeout` seconds
+(default 60) and a job that does not finish, a missing `flock`, the cluster
+check or any other failure of the pause end with a warning.
+
+The wrapper is looked for in the installed crontab of the account and in its
+`crontab-all` file in `/etc/cron.d`, commented lines aside. A project that does
+not use it is not affected: nothing is paused, checked or waited for. The first
+deploy that brings the wrapper is not paused either - the crontab using it gets
+installed by that publish.
+
+The wrapper:
+
+- waits while `.dep/cron.pause` exists; the file contains the longest pause
+  in seconds, counted from its modification time - after that the wrapper
+  removes it and goes on (a publish killed in the middle),
+- holds a shared `flock` on `.dep/cron.lock` while the job runs.
+
+With the wrapper in use, `app:cron_pause` needs `flock` on the hosts and - when
+the crontab of the account uses it - cronie in cluster mode (`crontab -c`
+reports the leader); a stage with a single host skips the check with
+`-o cron_cluster_check=false`.
+
 ### Maintenance during migrations
 
 DDL on a Galera cluster conflicts with the metadata locks of the running
@@ -229,9 +340,11 @@ it. Anything else needs it, and so does a migration with no SQL in the plan
 it) or a plan without the migration blocks at all. `DO SLEEP(...)` is the
 test migration of the window and always needs it. The plan is the
 Doctrine Migrations dry-run with `-vv` (`++ migrating`, `[debug] <sql>`,
-`Migration ... migrated`).
+`Migration ... migrated`). The expand phase of a project with the phases is
+narrower: only a statement with a foreign key (and the test migration) needs
+the window, see *Expand and Contract migrations*.
 
-When the window is needed, `app:migrations`:
+When the window is needed, `app:migrations` (and `app:migrations_contract`):
 
 1. creates `~/project/maintenance` on **all** hosts of the stage (inside the
    containers `/var/www/html/maintenance`),
@@ -273,19 +386,6 @@ file) - implemented by `handleMaintenance()` of
 
 Sessions of other DB users (people with their own accounts, backups) are not
 covered.
-
-### Expand and contract migrations
-
-The maintenance window ends with the migrations; until `deploy:publish` (and
-after a rollback) the old code of `current` keeps running on the migrated
-schema. A migration that removes what the old code still uses (`DROP` of
-a column or table, a rename, `NOT NULL`) therefore belongs to a contract
-migration of adt/doctrine-components (`expandContract: true`, README
-*Expand and contract migrations*): `migrations:migrate` defers it until its
-code is the running release, i.e. to the next deploy. The plan is the
-dry-run of the same command - it fails when an expand migration contains
-such a change, so `deploy:build` stops with the reason before anything runs.
-The recipe needs nothing for it.
 
 ## AppsDevTeam images
 
