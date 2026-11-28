@@ -154,13 +154,17 @@ set('bin/console', 'sudo -E php bin/console');
 
 // The code is mounted read-only into PHP-FPM on the server. It writes only into shared/, reached
 // from the release by symlinks:
-// - log, data (incl. data/locks of command-lock) and www/data are shared by all releases
+// - data (incl. data/locks of command-lock) and www/data are shared by all releases
 // - temp is per release (app:release_temp) - the DI and Latte cache belong to the code of one
 //   release, a new release must not rewrite the cache of the one still running on `current`
+// - log is per release too (app:release_log) - in a log shared by all releases nobody could tell
+//   the errors of the published release from older ones, and the preprod of a new release
+//   (php-next) wrote into the log of production
 // The symlinks must be relative: inside the container the deploy root is /var/www/html.
-set('shared_dirs', ['log', 'data', 'www/data']);
+set('shared_dirs', ['data', 'www/data']);
 set('use_relative_symlink', true);
 set('release_temp_root', '{{deploy_path}}/shared/temp/releases');
+set('release_log_root', '{{deploy_path}}/shared/log/releases');
 
 // Shared dirs with uploaded files, on GlusterFS when the stage has it (shared_storage_root)
 set('shared_storage_dirs', ['data', 'www/data']);
@@ -201,6 +205,7 @@ task('deploy:build', [
 	'deploy:writable',
 	'deploy:clear_paths',
 	'app:release_temp',
+	'app:release_log',
 	'app:build_images',
 	'app:prepare',
 	'app:preprod_up',
@@ -230,6 +235,7 @@ task('deploy:publish', [
 	'app:reload_consumers',
 	'deploy:cleanup',
 	'app:release_temp_cleanup',
+	'app:release_log_cleanup',
 	'deploy:success',
 ]);
 
@@ -322,7 +328,7 @@ task('deploy:temp_release_clone', function () {
 // /usr/local/bin/dupd is a symlink into /root, so `command -v` fails for the account. The running
 // containers are not touched, they get the new image in deploy:publish (app:containers_up). A host
 // without dupd keeps the manual `make docker-upd` by root.
-// After app:shared_storage, deploy:shared and app:release_temp: the validation refuses a bind
+// After app:shared_storage, deploy:shared, app:release_temp and app:release_log: the validation refuses a bind
 // mount whose source does not exist (docker would create it as root), and on the first deploy of
 // a stage those tasks are what creates shared/{log,data,www/data,temp} and the storage dirs.
 desc('Build images');
@@ -445,27 +451,40 @@ task('app:shared_storage', function () {
 	}
 });
 
-// The temp of a release lives in shared/temp/releases/<N> (a writable mount), the release has
-// a symlink `temp` to it instead of temp/ from git (just .gitignore)
-desc('Link per-release temp');
-task('app:release_temp', function () {
-	run('mkdir -p {{release_temp_root}}/{{release_name}}');
-	run('rm -rf {{release_path}}/temp');
-	run('{{bin/symlink}} {{release_temp_root}}/{{release_name}} {{release_path}}/temp');
-});
+// The temp and log of a release live in shared/<dir>/releases/<N> (a writable mount), the release
+// has a symlink to it instead of the directory from git (just .gitignore)
+function linkReleaseDir(string $dir, string $root): void
+{
+	run("mkdir -p $root/{{release_name}}");
+	run("rm -rf {{release_path}}/$dir");
+	run("{{bin/symlink}} $root/{{release_name}} {{release_path}}/$dir");
+}
 
-// Deletes the temp of releases already removed by deploy:cleanup (keep_releases) and of failed
+// Deletes the dirs of releases already removed by deploy:cleanup (keep_releases) and of failed
 // deploys. A failure does not fail the publish - the release is already public at that point.
-desc('Remove temp of deleted releases');
-task('app:release_temp_cleanup', function () {
+function cleanupReleaseDirs(string $dir, string $root): void
+{
 	try {
 		// {{deploy_path}} starts with ~, which would not expand inside quotes - the test would then
-		// claim no release exists and delete the temp of all releases including the published one
-		run('cd {{release_temp_root}} && for dir in *; do [ -d "$dir" ] && [ ! -d {{deploy_path}}/releases/"$dir" ] && rm -rf "$dir"; done; true');
+		// claim no release exists and delete the dirs of all releases including the published one
+		run("cd $root && for dir in *; do [ -d \"\$dir\" ] && [ ! -d {{deploy_path}}/releases/\"\$dir\" ] && rm -rf \"\$dir\"; done; true");
 	} catch (\Throwable $e) {
-		warning('Cleanup of the temp of old releases failed: ' . $e->getMessage());
+		warning("Cleanup of the $dir of old releases failed: " . $e->getMessage());
 	}
-});
+}
+
+desc('Link per-release temp');
+task('app:release_temp', fn () => linkReleaseDir('temp', get('release_temp_root')));
+
+// shared/log itself (the log of all releases before this split) stays as it is, nothing reads it
+desc('Link per-release log');
+task('app:release_log', fn () => linkReleaseDir('log', get('release_log_root')));
+
+desc('Remove temp of deleted releases');
+task('app:release_temp_cleanup', fn () => cleanupReleaseDirs('temp', get('release_temp_root')));
+
+desc('Remove logs of deleted releases');
+task('app:release_log_cleanup', fn () => cleanupReleaseDirs('log', get('release_log_root')));
 
 // Rollback switches `current` to the previous release with its own temp. The cache is deleted
 // anyway: it was created before a newer release ran its migrations, Nette rebuilds it.
@@ -475,6 +494,7 @@ task('app:rollback_temp', function () {
 });
 after('rollback', 'app:rollback_temp');
 after('rollback', 'app:release_temp_cleanup');
+after('rollback', 'app:release_log_cleanup');
 
 desc('Get the application ready');
 task('app:prepare', function () {
@@ -733,7 +753,7 @@ task('app:smoke_check', function () {
 	}
 	if ($failure === 'status') {
 		throw error("Preprod of {{alias}} answered $code on $path (Host: $host; expected 2xx, 3xx, 401 or 403) - the release is broken,"
-			. " see ~/project/shared/log and `sudo dupd logs php-next` (preprod; `php` without preprod). A path that is not public:"
+			. " see ~/project/shared/log/releases/{{release_name}} and `sudo dupd logs php-next` (preprod; `php` without preprod). A path that is not public:"
 			. " set('smoke_check_path', '/<public page>') in deploy.php. $skip");
 	}
 	info("preprod $path: $code");

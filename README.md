@@ -204,9 +204,13 @@ Files and servers:
   **every** host (local logs, local data cleanup): installed through
   `sudo crontab-all` of adt/docker-binaries into `/etc/cron.d`, which cronie
   runs on all nodes. Removing the file from the project removes it from the hosts.
-- `shared_dirs` = `log`, `data`, `www/data`; the compose override mounts
+- `shared_dirs` = `data`, `www/data`; the compose override mounts
   `${GLUSTERFS_APP_ROOT:-${PROJECT_ROOT}/project/shared}/{data,www/data}`.
-- `temp/` is per release under `shared/temp/releases/<N>`.
+- `temp/` and `log/` are per release under `shared/temp/releases/<N>` and
+  `shared/log/releases/<N>` (≥ 1.27): the log of `current` holds only the errors of
+  the published release, the preprod (`php-next`) writes into the log of the new
+  one. Both are deleted together with their release (`keep_releases`); the files
+  of `shared/log` from before 1.27 stay as they are.
 - A deployment created by Deployer 6 is converted by `deploy:v6_compat`
   automatically.
 - Long commands (`make _prepare`, migrations) have no timeout.
